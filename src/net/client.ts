@@ -4,7 +4,7 @@
 
 import { viewForward } from '../sim/aim';
 import type { V3 } from '../sim/map';
-import type { Dummy } from '../sim/player';
+import { TUNING, type Dummy } from '../sim/player';
 import { HostSession } from './host';
 import { makeOffer, type Link } from './link';
 import {
@@ -54,6 +54,8 @@ export class NetClient {
   private attempt = 0;
   private readonly samples = new Map<number, Sample[]>();
   private readonly dummies = new Map<number, Dummy>();
+  /** When each frozen player thaws, on the performance.now() clock. */
+  private readonly frozenUntil = new Map<number, number>();
 
   constructor(
     private readonly onMessage: (m: ServerMessage) => void,
@@ -130,6 +132,7 @@ export class NetClient {
     this.players.clear();
     this.samples.clear();
     this.dummies.clear();
+    this.frozenUntil.clear();
     this.code = '';
   }
 
@@ -175,7 +178,11 @@ export class NetClient {
         if (m.ko) this.samples.delete(m.target);
         break;
       }
+      case 'snared':
+        this.frozenUntil.set(m.target, performance.now() + TUNING.snareTime * 1000);
+        break;
       case 'respawn': {
+        this.frozenUntil.delete(m.id);
         const p = this.players.get(m.id);
         if (p) {
           p.alive = true;
@@ -201,6 +208,7 @@ export class NetClient {
       }
       d.name = info.name;
       d.hp = info.hp;
+      d.snareT = Math.max(0, ((this.frozenUntil.get(info.id) ?? 0) - now) / 1000);
 
       const sample = this.interpolate(info.id, now - RENDER_DELAY_MS);
       // Dead or not yet seen: hidden, and shots pass through.

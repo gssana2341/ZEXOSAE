@@ -193,7 +193,7 @@ function buildDummy(): DummyView {
 
   const wrap = new THREE.Mesh(
     new THREE.BoxGeometry(1.05, 2.0, 0.8),
-    new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.55 }),
+    new THREE.MeshBasicMaterial({ color: '#b8ecff', transparent: true, opacity: 0.6 }),
   );
   wrap.position.y = 1;
   wrap.visible = false;
@@ -259,7 +259,6 @@ export class GameView {
   private roll = 0;
   private fovBoost = 0;
   private time = 0;
-  private shake = 0;
   private kick = 0;
 
   constructor(
@@ -365,11 +364,6 @@ export class GameView {
     this.camera.updateProjectionMatrix();
   }
 
-  /** Short feedback for a landed hit. Skipped when the player asked for less motion. */
-  hitFeedback(strong: boolean): void {
-    if (!this.settings.reduceMotion) this.shake = strong ? 0.5 : 0.25;
-  }
-
   /** Kicks the firing arm back for a moment. */
   recoil(): void {
     this.kick = 1;
@@ -414,13 +408,7 @@ export class GameView {
     }
     this.roll += (rollTarget - this.roll) * blend(9);
 
-    this.shake = Math.max(0, this.shake - dt * 2.4);
-    const jitter = this.shake * this.shake * 0.05;
-    this.camera.rotation.set(
-      pitch + (Math.random() - 0.5) * jitter,
-      yaw + (Math.random() - 0.5) * jitter,
-      this.roll,
-    );
+    this.camera.rotation.set(pitch, yaw, this.roll);
 
     const speed = totalSpeed(p);
     const boostTarget = Math.min(reduce ? 4 : 20, Math.max(0, speed - 11) * (reduce ? 0.15 : 0.7));

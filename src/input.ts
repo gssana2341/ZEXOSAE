@@ -30,12 +30,9 @@ export class InputManager {
   yaw = 0;
   pitch = 0;
   enabled = false;
-  /** Set each frame by aim help: slows the view near a target. */
-  lookScale = 1;
   readonly aimScale = isCoarsePointer() ? TOUCH_AIM_SCALE : 1;
 
   private held = new Set<string>();
-  private lookMotion = 0;
   private pressed = new Set<Action>();
 
   private stick: StickTouch | null = null;
@@ -136,16 +133,8 @@ export class InputManager {
   }
 
   private look(dx: number, dy: number): void {
-    this.lookMotion += Math.hypot(dx, dy);
-    this.yaw -= dx * this.lookScale;
-    this.pitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, this.pitch - dy * this.lookScale));
-  }
-
-  /** How far the player has tried to turn since the last call, in radians. */
-  takeLookMotion(): number {
-    const motion = this.lookMotion;
-    this.lookMotion = 0;
-    return motion;
+    this.yaw -= dx;
+    this.pitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, this.pitch - dy));
   }
 
   private press(code: string): void {

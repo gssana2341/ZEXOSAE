@@ -28,7 +28,6 @@ export const TICK = 1 / TICK_RATE;
 
 const DUMMY_HP = 1;
 const DUMMY_SPEED = 5;
-const DUMMY_SNARED_SPEED = 0.8;
 const DUMMY_RESPAWN = 4;
 /** In practice, each dummy aims at the player this long, this often, so the warning can be felt. */
 const DUMMY_AIM_TIME = 1.2;
@@ -255,8 +254,8 @@ export class World {
 
       const { a, b } = this.map.patrols[i];
       const length = Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z) || 1;
-      const speed = d.snareT > 0 ? DUMMY_SNARED_SPEED : DUMMY_SPEED;
-      d.phase += (d.dir * speed * dt) / length;
+      if (d.snareT > 0) return;
+      d.phase += (d.dir * DUMMY_SPEED * dt) / length;
       if (d.phase >= 1) {
         d.phase = 1;
         d.dir = -1;

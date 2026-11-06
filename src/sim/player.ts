@@ -90,7 +90,8 @@ export const TUNING = {
   shotRadius: 0.8,
   shotCooldown: 0.28,
 
-  snareTime: 1.6,
+  /** How long a snare freezes its target. */
+  snareTime: 1.2,
   snareCooldown: 2.5,
 } as const;
 
@@ -187,7 +188,7 @@ export interface Player {
 
   shotCdT: number;
   snareCdT: number;
-  /** Time left under an enemy snare: no web, and half speed on the ground. */
+  /** Time left frozen by an enemy snare. */
   snareT: number;
   /** The dummy a shot would bend onto if fired now. */
   targetPreview: number | null;
@@ -619,10 +620,11 @@ function tick(t: number, dt: number): number {
   return t > 0 ? Math.max(0, t - dt) : 0;
 }
 
-/** An enemy snare cuts the web and holds the player back for a moment. */
+/** An enemy snare cuts the web and freezes the player in place. */
 export function snarePlayer(p: Player): void {
   p.snareT = TUNING.snareTime;
-  if (p.mode === 'swing') enterAir(p);
+  p.sliding = false;
+  if (p.mode === 'swing' || p.mode === 'dash') enterAir(p);
 }
 
 // ---------------------------------------------------------------- main step
@@ -651,11 +653,15 @@ export function stepPlayer(
   if (input.jump) p.jumpBufT = T.jumpBuffer;
   p.swingLatchT = input.swing ? tick(p.swingLatchT, dt) : 0;
 
-  const wish = wishDirection(p.yaw, input.moveX, input.moveZ);
   if (p.snareT > 0) {
-    wish.x *= 0.5;
-    wish.z *= 0.5;
+    // Frozen in place, even in mid-air. The camera can still look around.
+    p.vel = { x: 0, y: 0, z: 0 };
+    p.anchorPreview = null;
+    p.targetPreview = null;
+    return;
   }
+
+  const wish = wishDirection(p.yaw, input.moveX, input.moveZ);
 
   p.anchorPreview = p.mode === 'swing' ? p.anchor : findAnchor(p, map, input.webAssist);
   const target = input.aimAssist
@@ -690,7 +696,7 @@ export function stepPlayer(
     p.anchor = null;
   }
 
-  if (input.swing && p.swingLatchT === 0 && p.snareT === 0 && p.mode !== 'swing' && p.mode !== 'dash' && p.anchorPreview) {
+  if (input.swing && p.swingLatchT === 0 && p.mode !== 'swing' && p.mode !== 'dash' && p.anchorPreview) {
     startSwing(p, p.anchorPreview);
   }
 

@@ -6,8 +6,7 @@ import { SignalError, type NetError } from './net/signal';
 import { GameView } from './render/view';
 import { loadProfile, saveProfile } from './profile';
 import { isTouchDevice, loadBestLap, loadSettings, saveBestLap } from './settings';
-import { createAimState, stepAim } from './sim/aim';
-import { emptyInput, eyePosition, snarePlayer, type Player } from './sim/player';
+import { emptyInput, snarePlayer, type Player } from './sim/player';
 import type { V3 } from './sim/map';
 import { TICK, World } from './sim/world';
 import { formatTime, Hud, Menus } from './ui';
@@ -39,7 +38,6 @@ let prevPos = { ...world.player.pos };
 let koBy: string | null = null;
 let stateTimer = 0;
 let lobbyTimer = 0;
-const aim = createAimState();
 
 const toV3 = (v: Vec): V3 => ({ x: v[0], y: v[1], z: v[2] });
 const toVec = (v: V3): Vec => [
@@ -139,7 +137,6 @@ function onNetMessage(m: ServerMessage): void {
       break;
     case 'damage':
       if (m.target === net.id) {
-        view.hitFeedback(m.ko);
         if (m.ko) {
           setKoBy(net.players.get(m.by)?.name ?? '');
           profile.deaths += 1;
@@ -152,7 +149,6 @@ function onNetMessage(m: ServerMessage): void {
         hud.hitConfirm(m.ko);
         if (m.ko) {
           hud.toast('KO!', true);
-          view.hitFeedback(true);
           profile.kills += 1;
           saveProfile(profile);
         }
@@ -161,9 +157,10 @@ function onNetMessage(m: ServerMessage): void {
     case 'snared':
       if (m.target === net.id) {
         snarePlayer(world.player);
-        hud.toast('โดนใยรัด!');
+        hud.toast('โดนแช่แข็ง!');
       } else if (m.by === net.id) {
         hud.hitConfirm(false);
+        hud.toast('แช่แข็งแล้ว');
       }
       break;
     case 'respawn':
@@ -285,11 +282,10 @@ function handleEvents(): void {
       case 'hit':
         hud.hitConfirm(e.ko);
         if (e.ko) hud.toast('KO!', true);
-        view.hitFeedback(e.ko);
         break;
       case 'snare':
         hud.hitConfirm(false);
-        hud.toast('รัดติดแล้ว');
+        hud.toast('แช่แข็งแล้ว');
         break;
       case 'lap':
         hud.toast(`จบรอบ ${formatTime(e.time)}${e.best ? ' สถิติใหม่!' : ''}`, e.best);
@@ -298,28 +294,6 @@ function handleEvents(): void {
     }
   }
   world.events.length = 0;
-}
-
-function updateAim(dt: number): void {
-  const motion = input.takeLookMotion();
-  if (!settings.aimAssist || state !== 'playing' || koBy !== null) {
-    input.lookScale = 1;
-    return;
-  }
-  const result = stepAim(
-    aim,
-    input.yaw,
-    input.pitch,
-    eyePosition(world.player),
-    world.map,
-    world.dummies,
-    dt,
-    motion,
-    input.aimScale,
-  );
-  input.yaw = result.yaw;
-  input.pitch = result.pitch;
-  input.lookScale = result.lookScale;
 }
 
 function sendState(dt: number): void {
@@ -348,7 +322,6 @@ function frame(now: number): void {
   if (running) {
     if (input.consumeReset() && !world.online) restart();
     if (world.online) world.dummies = net.targets(now);
-    updateAim(dt);
 
     accumulator += dt;
     while (accumulator >= TICK) {

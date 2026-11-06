@@ -59,6 +59,7 @@ export class Hud {
   scoresKey = false;
 
   private readonly speedLines = el('div', 'speed-lines');
+  private readonly frozen = el('div', 'frozen-screen');
   private readonly edges = {
     top: el('div', 'danger danger-top'),
     right: el('div', 'danger danger-right'),
@@ -117,6 +118,7 @@ export class Hud {
     this.touch.append(this.stick, this.moveButton, this.attackButton, this.dashButton, this.snareButton);
     this.root.append(
       this.speedLines,
+      this.frozen,
       ...Object.values(this.edges),
       this.touch,
       this.anchor,
@@ -184,6 +186,8 @@ export class Hud {
     this.speedLines.style.opacity = this.settings.reduceMotion
       ? '0'
       : String(Math.max(0, Math.min(0.9, (speed - 15) / 20)));
+
+    this.frozen.classList.toggle('on', p.snareT > 0);
 
     const pulse = this.settings.reduceMotion ? 1 : 0.82 + 0.18 * Math.sin(performance.now() / 55);
     for (const edge of ['top', 'right', 'bottom', 'left'] as const) {

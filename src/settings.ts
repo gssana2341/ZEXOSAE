@@ -48,7 +48,7 @@ export const ACTION_LABELS: Record<Action, string> = {
   dash: 'พุ่งหลบ',
   slide: 'สไลด์ (กดค้าง)',
   shoot: 'ยิงใย',
-  snare: 'ใยรัด',
+  snare: 'ใยรัด (แช่แข็ง)',
   reset: 'กลับจุดเริ่ม',
   scores: 'ดูคะแนน (กดค้าง)',
 };

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ARENA_FLOOR, ARENA_LIMIT } from '../src/sim/map';
 import { TICK, World } from '../src/sim/world';
-import { emptyInput, horizontalSpeed, totalSpeed, TUNING, type TickInput, type WebAssist } from '../src/sim/player';
+import { emptyInput, horizontalSpeed, snarePlayer, totalSpeed, TUNING, type TickInput, type WebAssist } from '../src/sim/player';
 
 function run(world: World, seconds: number, input: Partial<TickInput> | ((t: number) => Partial<TickInput>)) {
   const ticks = Math.round(seconds / TICK);
@@ -414,11 +414,85 @@ describe('web shot', () => {
     expect(w.shots.length).toBeLessThanOrEqual(1);
   });
 
-  it('snare slows the dummy without hurting it', () => {
+  it('snare stops a dummy dead, then lets it go', () => {
+    const w = new World();
+    const d = w.dummies[1];
+    w.player.pos = { x: 0, y: 0.05, z: 0 };
+    d.snareT = TUNING.snareTime;
+    const held = { ...d.pos };
+    run(w, TUNING.snareTime - 0.1, {});
+    expect(d.pos).toEqual(held);
+    run(w, 0.5, {});
+    expect(d.pos).not.toEqual(held);
+  });
+
+  it('snare hits without hurting', () => {
     const w = facingDummy();
     run(w, 0.2, (t) => ({ snare: t === 0, aimAssist: false }));
     expect(w.dummies[0].snareT).toBeGreaterThan(0);
     expect(w.dummies[0].hp).toBe(1);
+  });
+});
+
+describe('frozen by a snare', () => {
+  function frozen(pos = { x: 0, y: 0.05, z: 8 }) {
+    const w = new World();
+    w.player.pos = { ...pos };
+    run(w, 0.1, {});
+    snarePlayer(w.player);
+    return w;
+  }
+
+  it('cannot move, jump, dash, swing or shoot', () => {
+    const w = frozen();
+    const at = { ...w.player.pos };
+    run(w, TUNING.snareTime - 0.1, (t) => ({
+      moveZ: 1,
+      jump: true,
+      dash: true,
+      swing: true,
+      shoot: t === 0,
+      pitch: 1,
+    }));
+    expect(w.player.pos).toEqual(at);
+    expect(w.player.mode).not.toBe('swing');
+    expect(w.shots).toHaveLength(0);
+  });
+
+  it('hangs in mid-air instead of falling', () => {
+    const w = new World();
+    w.player.pos = { x: 0, y: 30, z: 8 };
+    w.player.vel = { x: 10, y: -20, z: 0 };
+    w.player.mode = 'air';
+    snarePlayer(w.player);
+    run(w, TUNING.snareTime - 0.1, {});
+    expect(w.player.pos.y).toBe(30);
+    expect(w.player.pos.x).toBe(0);
+  });
+
+  it('can still look around', () => {
+    const w = frozen();
+    run(w, 0.1, { yaw: 1.2, pitch: 0.4 });
+    expect(w.player.yaw).toBe(1.2);
+    expect(w.player.pitch).toBe(0.4);
+  });
+
+  it('thaws on time and can move again', () => {
+    const w = frozen();
+    const z = w.player.pos.z;
+    run(w, TUNING.snareTime + 0.4, { moveZ: 1 });
+    expect(w.player.snareT).toBe(0);
+    expect(w.player.pos.z).toBeLessThan(z - 1);
+  });
+
+  it('drops the web when frozen', () => {
+    const w = new World();
+    w.player.pos = { x: 0, y: 14, z: 22 };
+    w.player.mode = 'air';
+    run(w, 0.05, { swing: true, pitch: 0.9, aimAssist: false });
+    expect(w.player.mode).toBe('swing');
+    snarePlayer(w.player);
+    expect(w.player.anchor).toBeNull();
   });
 });
 
