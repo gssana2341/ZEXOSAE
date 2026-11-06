@@ -1,20 +1,30 @@
-// The game's side of the connection. Other players are drawn slightly in the past
-// so their movement can be blended between server updates instead of jumping.
+// The game's side of a room, whether this player hosts it or joined it. Other
+// players are drawn slightly in the past, so their movement can be blended between
+// updates instead of jumping.
 
 import { viewForward } from '../sim/aim';
-import type { Dummy } from '../sim/player';
 import type { V3 } from '../sim/map';
+import type { Dummy } from '../sim/player';
+import { HostSession } from './host';
+import { makeOffer, type Link } from './link';
 import {
+  cleanCode,
   PLAYER_HP,
   type ClientMessage,
   type PlayerInfo,
   type PlayerSnapshot,
+  type RoomSummary,
   type ServerMessage,
   type Vec,
 } from './protocol';
+import { createRoom, listRooms, poll, sendToHost, SignalError } from './signal';
 
 const RENDER_DELAY_MS = 120;
 const MAX_SAMPLES = 12;
+/** The host checks for new players every few seconds, so answers take a moment. */
+const ANSWER_TIMEOUT_MS = 12000;
+const ANSWER_POLL_MS = 800;
+const CONNECT_TIMEOUT_MS = 12000;
 
 interface Sample extends PlayerSnapshot {
   at: number;
@@ -22,26 +32,26 @@ interface Sample extends PlayerSnapshot {
 
 const toV3 = (v: Vec): V3 => ({ x: v[0], y: v[1], z: v[2] });
 
-/** The room server's address. Empty means the server that delivered this page. */
-const SERVER_URL: string = import.meta.env.VITE_SERVER_URL ?? '';
-
-function serverUrl(): string {
-  if (SERVER_URL) return SERVER_URL;
-  const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
-  return `${scheme}://${location.host}/ws`;
-}
-
 function angleLerp(a: number, b: number, k: number): number {
   return a + Math.atan2(Math.sin(b - a), Math.cos(b - a)) * k;
 }
+
+function randomBox(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return `p:${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`;
+}
+
+const wait = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
 
 export class NetClient {
   id = 0;
   code = '';
   readonly players = new Map<number, PlayerInfo>();
 
-  private socket: WebSocket | null = null;
-  private readonly pending: ClientMessage[] = [];
+  private host: HostSession | null = null;
+  private link: Link | null = null;
+  /** Bumped on every new attempt, so a slow old join can tell it was cancelled. */
+  private attempt = 0;
   private readonly samples = new Map<number, Sample[]>();
   private readonly dummies = new Map<number, Dummy>();
 
@@ -50,36 +60,73 @@ export class NetClient {
     private readonly onClosed: () => void,
   ) {}
 
-  /** Sends a message, opening the connection first if needed. */
-  request(message: ClientMessage): void {
-    if (this.socket?.readyState === WebSocket.OPEN) {
-      this.send(message);
-      return;
-    }
-    this.pending.push(message);
-    if (this.socket?.readyState === WebSocket.CONNECTING) return;
+  listRooms(): Promise<RoomSummary[]> {
+    return listRooms();
+  }
 
-    const socket = new WebSocket(serverUrl());
-    this.socket = socket;
+  async create(name: string, maxPlayers: number): Promise<void> {
+    this.close();
+    const attempt = this.attempt;
+    const { code, hostKey } = await createRoom(name, maxPlayers);
+    if (attempt !== this.attempt) return;
 
-    socket.addEventListener('open', () => {
-      for (const m of this.pending.splice(0)) this.send(m);
-    });
-    socket.addEventListener('message', (e) => this.receive(JSON.parse(e.data as string) as ServerMessage));
-    socket.addEventListener('close', () => {
-      if (this.socket !== socket) return;
-      this.socket = null;
-      this.pending.length = 0;
-      this.onClosed();
+    this.host = new HostSession(code, hostKey, maxPlayers, name, {
+      send: (m) => this.receive(m),
     });
   }
 
-  /** Leaves on purpose. Unlike a dropped connection, this doesn't call onClosed. */
+  async join(rawCode: string, name: string): Promise<void> {
+    this.close();
+    const attempt = this.attempt;
+    const code = cleanCode(rawCode);
+    const box = randomBox();
+
+    const { link, sdp } = await makeOffer();
+    try {
+      await sendToHost(code, JSON.stringify({ from: box, sdp }));
+      const answer = await this.waitForAnswer(box, attempt);
+      await link.accept(answer);
+      if (!(await link.opened(CONNECT_TIMEOUT_MS))) throw new SignalError('connect');
+    } catch (error) {
+      link.close();
+      throw error;
+    }
+    if (attempt !== this.attempt) {
+      link.close();
+      return;
+    }
+
+    this.link = link;
+    link.onMessage = (raw) => this.receive(JSON.parse(raw) as ServerMessage);
+    link.onClosed = () => {
+      this.link = null;
+      this.reset();
+      this.onClosed();
+    };
+    this.send({ t: 'join', code, name });
+  }
+
+  private async waitForAnswer(box: string, attempt: number): Promise<string> {
+    const started = performance.now();
+    while (attempt === this.attempt && performance.now() - started < ANSWER_TIMEOUT_MS) {
+      const [signal] = await poll(box);
+      if (signal) return (JSON.parse(signal) as { sdp: string }).sdp;
+      await wait(ANSWER_POLL_MS);
+    }
+    throw new SignalError('connect');
+  }
+
+  /** Leaves on purpose, so this doesn't call onClosed. */
   close(): void {
-    const socket = this.socket;
-    this.socket = null;
-    this.pending.length = 0;
-    socket?.close();
+    this.attempt += 1;
+    this.host?.stop();
+    this.host = null;
+    this.link?.close();
+    this.link = null;
+    this.reset();
+  }
+
+  private reset(): void {
     this.players.clear();
     this.samples.clear();
     this.dummies.clear();
@@ -87,7 +134,8 @@ export class NetClient {
   }
 
   send(message: ClientMessage): void {
-    if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(message));
+    if (this.host) this.host.fromLocal(message);
+    else this.link?.send(JSON.stringify(message), message.t === 'state');
   }
 
   private receive(m: ServerMessage): void {

@@ -1,0 +1,226 @@
+// The only server code in the game. It lists open rooms and passes connection
+// offers between browsers. Game traffic never comes here: players connect to the
+// host's browser directly. Vercel doesn't keep memory between requests, so this
+// state lives in Redis. This file has no local imports, to deploy as one function.
+
+export interface RoomRecord {
+  code: string;
+  host: string;
+  players: number;
+  max: number;
+  hostKey: string;
+}
+
+export interface Store {
+  /** Saves a new room. Returns false if the code is taken. */
+  claimRoom(room: RoomRecord): Promise<boolean>;
+  putRoom(room: RoomRecord): Promise<void>;
+  getRoom(code: string): Promise<RoomRecord | null>;
+  removeRoom(code: string): Promise<void>;
+  listRooms(): Promise<RoomRecord[]>;
+  pushSignal(box: string, data: string): Promise<void>;
+  takeSignals(box: string): Promise<string[]>;
+}
+
+/** A room disappears this long after its host stops checking in. */
+export const ROOM_TTL_SECONDS = 25;
+const SIGNAL_TTL_SECONDS = 60;
+const MAX_SIGNALS_PER_POLL = 20;
+const MAX_LISTED_ROOMS = 40;
+const MAX_BODY_CHARS = 16000;
+
+const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const CODE_PATTERN = /^[A-Z2-9]{4}$/;
+const HOST_BOX = /^h:[A-Z2-9]{4}$/;
+const PEER_BOX = /^p:[a-f0-9]{32}$/;
+
+const json = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+  });
+
+const fail = (error: string, status: number) => json({ error }, status);
+
+function newCode(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(4));
+  return Array.from(bytes, (b) => CODE_ALPHABET[b % CODE_ALPHABET.length]).join('');
+}
+
+function cleanName(raw: unknown): string {
+  const name = typeof raw === 'string' ? raw.replace(/[\p{C}]/gu, '').trim().slice(0, 16) : '';
+  return name || 'ผู้เล่น';
+}
+
+const clampSize = (raw: unknown, low: number, high: number, fallback: number) => {
+  const n = typeof raw === 'number' && Number.isFinite(raw) ? Math.floor(raw) : fallback;
+  return Math.max(low, Math.min(high, n));
+};
+
+async function ownedRoom(store: Store, code: unknown, hostKey: unknown): Promise<RoomRecord | null> {
+  if (typeof code !== 'string' || !CODE_PATTERN.test(code)) return null;
+  const room = await store.getRoom(code);
+  return room && room.hostKey === hostKey ? room : null;
+}
+
+export async function handle(request: Request, store: Store | null): Promise<Response> {
+  if (!store) return fail('no-store', 503);
+
+  if (request.method === 'GET') {
+    const rooms = await store.listRooms();
+    const open = (r: RoomRecord) => (r.players < r.max ? 1 : 0);
+    return json({
+      rooms: rooms
+        .sort((a, b) => open(b) - open(a) || b.players - a.players)
+        .slice(0, MAX_LISTED_ROOMS)
+        .map(({ code, host, players, max }) => ({ code, host, players, max })),
+    });
+  }
+  if (request.method !== 'POST') return fail('method', 405);
+
+  const raw = await request.text();
+  if (raw.length > MAX_BODY_CHARS) return fail('too-large', 413);
+
+  let m: Record<string, unknown>;
+  try {
+    m = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return fail('bad-request', 400);
+  }
+
+  switch (m.action) {
+    case 'create': {
+      const hostKey = crypto.randomUUID();
+      const max = clampSize(m.max, 2, 16, 8);
+      for (let tries = 0; tries < 8; tries += 1) {
+        const room = { code: newCode(), host: cleanName(m.host), players: 1, max, hostKey };
+        if (await store.claimRoom(room)) return json({ code: room.code, hostKey });
+      }
+      return fail('busy', 503);
+    }
+
+    case 'beat': {
+      const room = await ownedRoom(store, m.code, m.hostKey);
+      if (!room) return fail('not-found', 404);
+      await store.putRoom({ ...room, players: clampSize(m.players, 0, room.max, room.players) });
+      return json({ ok: true });
+    }
+
+    case 'close': {
+      if (await ownedRoom(store, m.code, m.hostKey)) await store.removeRoom(m.code as string);
+      return json({ ok: true });
+    }
+
+    case 'send': {
+      const { to, data } = m;
+      if (typeof to !== 'string' || typeof data !== 'string') return fail('bad-request', 400);
+
+      if (HOST_BOX.test(to)) {
+        if (!(await store.getRoom(to.slice(2)))) return fail('not-found', 404);
+      } else if (!PEER_BOX.test(to) || !(await ownedRoom(store, m.code, m.hostKey))) {
+        // Only a room's host may write to a player's box.
+        return fail('bad-request', 400);
+      }
+      await store.pushSignal(to, data);
+      return json({ ok: true });
+    }
+
+    case 'poll': {
+      const { box } = m;
+      if (typeof box !== 'string') return fail('bad-request', 400);
+      if (HOST_BOX.test(box)) {
+        if (!(await ownedRoom(store, box.slice(2), m.hostKey))) return fail('not-found', 404);
+      } else if (!PEER_BOX.test(box)) {
+        return fail('bad-request', 400);
+      }
+      return json({ signals: await store.takeSignals(box) });
+    }
+
+    default:
+      return fail('bad-request', 400);
+  }
+}
+
+// ------------------------------------------------------------------ Redis
+
+const ROOM_INDEX = 'zx:rooms';
+const roomKey = (code: string) => `zx:room:${code}`;
+const signalKey = (box: string) => `zx:signal:${box}`;
+
+/** Talks to Upstash Redis over its REST API, which suits short-lived functions. */
+export function redisStore(url: string, token: string): Store {
+  async function run<T>(...commands: Array<Array<string | number>>): Promise<T[]> {
+    const response = await fetch(`${url}/pipeline`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(commands),
+    });
+    if (!response.ok) throw new Error(`Redis responded ${response.status}`);
+    const results = (await response.json()) as Array<{ result: T; error?: string }>;
+    return results.map((r) => {
+      if (r.error) throw new Error(r.error);
+      return r.result;
+    });
+  }
+
+  const expiry = () => Date.now() + ROOM_TTL_SECONDS * 1000;
+
+  return {
+    async claimRoom(room) {
+      const [claimed] = await run<string | null>([
+        'SET', roomKey(room.code), JSON.stringify(room), 'NX', 'EX', ROOM_TTL_SECONDS,
+      ]);
+      if (claimed !== 'OK') return false;
+      await run(['ZADD', ROOM_INDEX, expiry(), room.code]);
+      return true;
+    },
+    async putRoom(room) {
+      await run(
+        ['SET', roomKey(room.code), JSON.stringify(room), 'EX', ROOM_TTL_SECONDS],
+        ['ZADD', ROOM_INDEX, expiry(), room.code],
+      );
+    },
+    async getRoom(code) {
+      const [value] = await run<string | null>(['GET', roomKey(code)]);
+      return value ? (JSON.parse(value) as RoomRecord) : null;
+    },
+    async removeRoom(code) {
+      await run(['DEL', roomKey(code)], ['ZREM', ROOM_INDEX, code]);
+    },
+    async listRooms() {
+      const [, codes] = await run<unknown>(
+        ['ZREMRANGEBYSCORE', ROOM_INDEX, '-inf', Date.now()],
+        ['ZRANGE', ROOM_INDEX, 0, MAX_LISTED_ROOMS - 1],
+      );
+      const list = codes as string[];
+      if (!list.length) return [];
+      const [values] = await run<Array<string | null>>(['MGET', ...list.map(roomKey)]);
+      return values.flatMap((v) => (v ? [JSON.parse(v) as RoomRecord] : []));
+    },
+    async pushSignal(box, data) {
+      await run(['RPUSH', signalKey(box), data], ['EXPIRE', signalKey(box), SIGNAL_TTL_SECONDS]);
+    },
+    async takeSignals(box) {
+      const [values] = await run<string[] | null>(['LPOP', signalKey(box), MAX_SIGNALS_PER_POLL]);
+      return values ?? [];
+    },
+  };
+}
+
+function storeFromEnv(): Store | null {
+  // Vercel's Redis integrations use one of these two sets of names.
+  const url = process.env.UPSTASH_REDIS_REST_URL ?? process.env.KV_REST_API_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN ?? process.env.KV_REST_API_TOKEN;
+  return url && token ? redisStore(url, token) : null;
+}
+
+export default {
+  async fetch(request: Request): Promise<Response> {
+    try {
+      return await handle(request, storeFromEnv());
+    } catch (error) {
+      console.error(error);
+      return fail('store-failed', 503);
+    }
+  },
+};

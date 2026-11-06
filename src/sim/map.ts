@@ -37,6 +37,10 @@ export interface GameMap {
 }
 
 export const RING_RADIUS = 4.5;
+/** The inner faces of the boundary walls. Past this, the player has left the arena. */
+export const ARENA_LIMIT = 90;
+/** Below this, the player has fallen out of the arena. */
+export const ARENA_FLOOR = -8;
 
 const v = (x: number, y: number, z: number): V3 => ({ x, y, z });
 

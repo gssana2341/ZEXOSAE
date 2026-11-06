@@ -1,11 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { WebSocket } from 'ws';
-import { startServer, type GameServer } from '../server/app';
-import { Lobby, Room, type Client } from '../server/rooms';
+import { describe, expect, it } from 'vitest';
+import { Room, type Client } from '../src/net/room';
 import {
   cleanName,
-  CODE_ALPHABET,
-  DEFAULT_ROOM_SIZE,
   MAX_ROOM_SIZE,
   parseClientMessage,
   RESPAWN_MS,
@@ -46,85 +42,17 @@ function roomWithTwo() {
   return { room, a, b, idA, idB, hit, advance: (ms: number) => (time += ms) };
 }
 
-describe('lobby', () => {
-  it('creates a room with a 4-letter code from the safe alphabet', () => {
-    const lobby = new Lobby();
-    const client = new FakeClient();
-    const result = lobby.create(client, 'A', DEFAULT_ROOM_SIZE);
-    if (typeof result === 'string') throw new Error(result);
-    expect(result.room.code).toHaveLength(4);
-    for (const c of result.room.code) expect(CODE_ALPHABET).toContain(c);
-    expect(client.last('joined')?.code).toBe(result.room.code);
-  });
-
-  it('joins with a lowercase code and spaces around it', () => {
-    const lobby = new Lobby();
-    const created = lobby.create(new FakeClient(), 'A', DEFAULT_ROOM_SIZE);
-    if (typeof created === 'string') throw new Error(created);
-    const friend = new FakeClient();
-    const joined = lobby.join(friend, `  ${created.room.code.toLowerCase()} `, 'B');
-    expect(typeof joined).not.toBe('string');
-    expect(friend.last('joined')?.players).toHaveLength(2);
-  });
-
-  it('rejects an unknown code', () => {
-    expect(new Lobby().join(new FakeClient(), 'ZZZZ', 'A')).toBe('not-found');
-  });
-
+describe('room size', () => {
   it('stops at the size chosen when the room was made', () => {
-    const lobby = new Lobby();
-    const created = lobby.create(new FakeClient(), 'A', 4);
-    if (typeof created === 'string') throw new Error(created);
-    for (let i = 1; i < 4; i += 1) lobby.join(new FakeClient(), created.room.code, 'X');
-    expect(lobby.join(new FakeClient(), created.room.code, 'Late')).toBe('full');
-  });
-
-  it('keeps room sizes between 2 and 16', () => {
-    const lobby = new Lobby();
-    const big = lobby.create(new FakeClient(), 'A', 99);
-    const small = lobby.create(new FakeClient(), 'B', 0);
-    if (typeof big === 'string' || typeof small === 'string') throw new Error('create failed');
-    expect(big.room.maxPlayers).toBe(MAX_ROOM_SIZE);
-    expect(small.room.maxPlayers).toBe(2);
+    const room = new Room('TEST', () => 0, 4);
+    for (let i = 0; i < 4; i += 1) expect(room.add(new FakeClient(), 'X')).not.toBeNull();
+    expect(room.add(new FakeClient(), 'Late')).toBeNull();
   });
 
   it('holds a full room of 16', () => {
-    const lobby = new Lobby();
-    const created = lobby.create(new FakeClient(), 'A', 16);
-    if (typeof created === 'string') throw new Error(created);
-    for (let i = 1; i < 16; i += 1) {
-      expect(typeof lobby.join(new FakeClient(), created.room.code, 'X')).not.toBe('string');
-    }
-    expect(created.room.size).toBe(16);
-  });
-
-  it('lists rooms with space first, busiest first', () => {
-    const lobby = new Lobby();
-    const quiet = lobby.create(new FakeClient(), 'Quiet', 8);
-    const busy = lobby.create(new FakeClient(), 'Busy', 8);
-    const full = lobby.create(new FakeClient(), 'Full', 2);
-    if (typeof quiet === 'string' || typeof busy === 'string' || typeof full === 'string') throw new Error('create failed');
-    lobby.join(new FakeClient(), busy.room.code, 'X');
-    lobby.join(new FakeClient(), full.room.code, 'X');
-    expect(lobby.list().map((r) => r.host)).toEqual(['Busy', 'Quiet', 'Full']);
-    expect(lobby.list()[0]).toMatchObject({ players: 2, max: 8, code: busy.room.code });
-  });
-
-  it('passes the room name to the next player when the host leaves', () => {
-    const lobby = new Lobby();
-    const created = lobby.create(new FakeClient(), 'Host', 8);
-    if (typeof created === 'string') throw new Error(created);
-    lobby.join(new FakeClient(), created.room.code, 'Next');
-    lobby.leave(created.room, created.id);
-    expect(lobby.list()[0].host).toBe('Next');
-  });
-
-  it('removes the room when the last player leaves', () => {
-    const lobby = new Lobby();
-    const created = lobby.create(new FakeClient(), 'A', DEFAULT_ROOM_SIZE);
-    if (typeof created === 'string') throw new Error(created);
-    lobby.leave(created.room, created.id);
-    expect(lobby.rooms.size).toBe(0);
+    const room = new Room('TEST', () => 0, MAX_ROOM_SIZE);
+    for (let i = 0; i < MAX_ROOM_SIZE; i += 1) room.add(new FakeClient(), 'X');
+    expect(room.size).toBe(MAX_ROOM_SIZE);
   });
 });
 
@@ -277,9 +205,9 @@ describe('message checks', () => {
     '{"t":"state","pos":[1,2],"yaw":0,"pitch":0,"anchor":null}',
     '{"t":"state","pos":[1,2,"3"],"yaw":0,"pitch":0,"anchor":null}',
     '{"t":"hit","target":"1","snare":false}',
-    `{"t":"create","name":"${'x'.repeat(100)}","maxPlayers":8}`,
-    '{"t":"create","name":"x"}',
-    '{"t":"create","name":"x","maxPlayers":"8"}',
+    `{"t":"join","code":"ABCD","name":"${'x'.repeat(100)}"}`,
+    '{"t":"join","name":"x"}',
+    '{"t":"list"}',
   ])('rejects %s', (raw) => {
     expect(parseClientMessage(raw)).toBeNull();
   });
@@ -338,92 +266,3 @@ describe('online world', () => {
   });
 });
 
-describe('real sockets', () => {
-  let server: GameServer;
-
-  beforeEach(async () => {
-    server = await startServer(0);
-  });
-  afterEach(async () => {
-    await server.close();
-  });
-
-  function connect() {
-    const socket = new WebSocket(`ws://localhost:${server.port}/ws`);
-    const inbox: ServerMessage[] = [];
-    const waiters: Array<() => void> = [];
-    socket.on('message', (data) => {
-      inbox.push(JSON.parse(data.toString()) as ServerMessage);
-      waiters.splice(0).forEach((w) => w());
-    });
-    const until = async <T extends ServerMessage['t']>(t: T) => {
-      for (;;) {
-        const found = inbox.find((m) => m.t === t);
-        if (found) return found as Extract<ServerMessage, { t: T }>;
-        await new Promise<void>((r) => waiters.push(r));
-      }
-    };
-    const opened = new Promise<void>((r) => socket.on('open', () => r()));
-    return { socket, until, opened, send: (m: ClientMessage) => socket.send(JSON.stringify(m)) };
-  }
-
-  it('two players meet in a room, see each other move, and the room closes after', async () => {
-    const host = connect();
-    await host.opened;
-    host.send({ t: 'create', name: 'Host', maxPlayers: 8 });
-    const { code, id: hostId } = await host.until('joined');
-
-    const friend = connect();
-    await friend.opened;
-    friend.send({ t: 'join', code, name: 'Friend' });
-    const joined = await friend.until('joined');
-    expect(joined.players.map((p) => p.name).sort()).toEqual(['Friend', 'Host']);
-    expect((await host.until('playerJoin')).player.name).toBe('Friend');
-
-    host.send({ t: 'state', pos: [5, 6, 7], yaw: 1, pitch: 0.5, anchor: null });
-    for (;;) {
-      await new Promise((r) => setTimeout(r, 30));
-      const snap = await friend.until('snapshot');
-      const seen = snap.players.find((p) => p.id === hostId);
-      if (seen?.pitch === 0.5) break;
-    }
-
-    host.socket.close();
-    await friend.until('playerLeave');
-    friend.socket.close();
-    await new Promise((r) => setTimeout(r, 60));
-    expect(server.lobby.rooms.size).toBe(0);
-  });
-
-  it('shows open rooms to someone who has not joined, without putting them in a room', async () => {
-    const host = connect();
-    await host.opened;
-    host.send({ t: 'create', name: 'Host', maxPlayers: 6 });
-    const { code } = await host.until('joined');
-
-    const visitor = connect();
-    await visitor.opened;
-    visitor.send({ t: 'list' });
-    const { rooms } = await visitor.until('rooms');
-    expect(rooms).toEqual([{ code, host: 'Host', players: 1, max: 6 }]);
-
-    visitor.send({ t: 'join', code, name: 'Visitor' });
-    expect((await visitor.until('joined')).players).toHaveLength(2);
-    host.socket.close();
-    visitor.socket.close();
-  });
-
-  it('answers a wrong code with an error and ignores garbage', async () => {
-    const c = connect();
-    await c.opened;
-    c.socket.send('garbage');
-    c.send({ t: 'join', code: 'ZZZZ', name: 'A' });
-    expect((await c.until('error')).reason).toBe('not-found');
-    c.socket.close();
-  });
-
-  it('will not serve files outside the build folder', async () => {
-    const res = await fetch(`http://localhost:${server.port}/..%2fpackage.json`);
-    expect(res.status).not.toBe(200);
-  });
-});

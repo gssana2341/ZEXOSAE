@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { ARENA_FLOOR, ARENA_LIMIT } from '../src/sim/map';
 import { TICK, World } from '../src/sim/world';
 import { emptyInput, horizontalSpeed, totalSpeed, TUNING, type TickInput, type WebAssist } from '../src/sim/player';
 
@@ -419,6 +420,91 @@ describe('web shot', () => {
     expect(w.dummies[0].snareT).toBeGreaterThan(0);
     expect(w.dummies[0].hp).toBe(1);
   });
+});
+
+describe('leaving the arena', () => {
+  const outside = (w: World) =>
+    Math.abs(w.player.pos.x) > ARENA_LIMIT || Math.abs(w.player.pos.z) > ARENA_LIMIT || w.player.pos.y < ARENA_FLOOR;
+
+  it.each([
+    ['over the east wall', { x: 90.5, y: 100, z: 0 }],
+    ['over the west wall', { x: -90.5, y: 100, z: 0 }],
+    ['over the north wall', { x: 0, y: 100, z: -90.5 }],
+    ['over the south wall', { x: 0, y: 100, z: 90.5 }],
+    ['through the floor', { x: 0, y: -9, z: 0 }],
+  ])('comes back from %s', (_name, pos) => {
+    const w = new World();
+    w.player.pos = pos;
+    w.player.mode = 'air';
+    run(w, TICK, {});
+    expect(outside(w)).toBe(false);
+    expect(w.events.some((e) => e.type === 'outOfBounds')).toBe(true);
+  });
+
+  it('practice goes back to the start and restarts the lap', () => {
+    const w = new World();
+    w.ringIndex = 3;
+    w.lapRunning = true;
+    w.player.pos = { x: 95, y: 100, z: 0 };
+    run(w, TICK, {});
+    expect(w.player.pos.z).toBeCloseTo(w.map.spawn.z, 1);
+    expect(w.ringIndex).toBe(0);
+    expect(w.lapRunning).toBe(false);
+  });
+
+  it('online returns to a spawn point away from other players', () => {
+    for (let i = 0; i < 40; i += 1) {
+      const w = new World();
+      w.setOnline(true);
+      const near = w.map.spawns[0].pos;
+      w.dummies = [{ id: 7, pos: { ...near }, hp: 1, snareT: 0, respawnT: 0, phase: 0, dir: 1 }];
+      w.respawnAt({ x: 95, y: 100, z: 0 }, 0);
+      w.step(emptyInput(), TICK);
+      const p = w.player.pos;
+      expect(w.map.spawns.some((s) => s.pos.x === p.x && s.pos.z === p.z)).toBe(true);
+      expect(Math.hypot(p.x - near.x, p.y - near.y, p.z - near.z)).toBeGreaterThanOrEqual(30);
+    }
+  });
+
+  it('does not touch a player inside the arena, even on top of a tower', () => {
+    const w = new World();
+    w.player.pos = { x: 48, y: 62.05, z: 48 };
+    run(w, 0.5, {});
+    expect(w.player.pos.x).toBe(48);
+    expect(w.events.some((e) => e.type === 'outOfBounds')).toBe(false);
+  });
+
+  it('survives wild play without ever ending a tick outside', () => {
+    for (let seed = 1; seed <= 25; seed += 1) {
+      let state = seed;
+      const random = () => {
+        state = (state * 1664525 + 1013904223) >>> 0;
+        return state / 2 ** 32;
+      };
+      const w = new World();
+      w.setOnline(true);
+      const spawn = w.map.spawns[seed % w.map.spawns.length];
+      w.respawnAt(spawn.pos, spawn.yaw);
+
+      let yaw = spawn.yaw;
+      let pitch = 0.5;
+      let swing = false;
+      let swap = 0;
+      for (let i = 0; i < 60 * 30; i += 1) {
+        if (random() < 0.03) {
+          yaw += (random() - 0.5) * 3;
+          pitch = random() * 1.5 - 0.2;
+        }
+        swap -= 1;
+        if (swap <= 0) {
+          swing = !swing;
+          swap = swing ? 30 + random() * 150 : 10 + random() * 60;
+        }
+        w.step({ ...emptyInput(), yaw, pitch, moveZ: 1, swing, jump: random() < 0.03, dash: random() < 0.01, webAssist: 'near' }, TICK);
+        expect(outside(w)).toBe(false);
+      }
+    }
+  }, 30000);
 });
 
 describe('course', () => {

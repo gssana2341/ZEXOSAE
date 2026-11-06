@@ -429,8 +429,8 @@ export class Menus {
     );
   }
 
-  roomBoardError(): void {
-    this.roomList.replaceChildren(el('p', 'empty', 'ดูรายการห้องไม่ได้ เพราะเชื่อมต่อเซิร์ฟเวอร์ไม่ได้'));
+  roomBoardError(text: string): void {
+    this.roomList.replaceChildren(el('p', 'empty', text));
   }
 
   showOnline(code = ''): void {
@@ -485,7 +485,7 @@ export class Menus {
       codeInput,
       this.button('เข้าห้อง', join, !!code),
       this.status,
-      el('p', 'device-note', 'ชื่อและคะแนนเก็บในเครื่องนี้ ถ้าล้างแคชข้อมูลจะหาย'),
+      el('p', 'device-note', 'คนสร้างห้องต้องเปิดเกมค้างไว้ ถ้าออก ห้องจะจบ ชื่อและคะแนนเก็บในเครื่องนี้ ถ้าล้างแคชข้อมูลจะหาย'),
       this.button('กลับ', () => {
         this.actions.saveName(name.value);
         this.actions.closeLobby();

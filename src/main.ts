@@ -1,6 +1,7 @@
 import { InputManager } from './input';
 import { NetClient } from './net/client';
 import { cleanCode, CODE_LENGTH, STATE_HZ, type ServerMessage, type Vec } from './net/protocol';
+import { SignalError, type NetError } from './net/signal';
 import { GameView } from './render/view';
 import { loadProfile, saveProfile } from './profile';
 import { isTouchDevice, loadBestLap, loadSettings, saveBestLap } from './settings';
@@ -16,7 +17,7 @@ const canvas = document.querySelector<HTMLCanvasElement>('#game')!;
 const uiRoot = document.querySelector<HTMLElement>('#ui')!;
 const touchDevice = isTouchDevice();
 
-const LOBBY_REFRESH_MS = 3000;
+const LOBBY_REFRESH_MS = 5000;
 
 const settings = loadSettings();
 const profile = loadProfile();
@@ -96,17 +97,20 @@ function spawnAt(pos: Vec, yaw: number): void {
   syncLook(world.player);
 }
 
-const JOIN_ERRORS = {
+const NET_ERRORS: Record<NetError, string> = {
   'not-found': 'ไม่พบห้องนี้ เช็กรหัสอีกครั้ง',
   full: 'ห้องเต็มแล้ว',
-  busy: 'เซิร์ฟเวอร์เต็ม ลองอีกครั้งภายหลัง',
+  busy: 'ระบบห้องไม่ว่าง ลองอีกครั้งภายหลัง',
+  'no-store': 'ระบบห้องยังไม่พร้อม ต้องเชื่อม Redis ใน Vercel ก่อน',
+  connect: 'เชื่อมต่อกับเจ้าของห้องไม่ได้ เครือข่ายอาจบล็อกการต่อตรง',
+  network: 'ติดต่อระบบห้องไม่ได้ เช็กอินเทอร์เน็ตแล้วลองใหม่',
 };
+
+const netMessage = (error: unknown) =>
+  NET_ERRORS[error instanceof SignalError ? error.reason : 'connect'];
 
 function onNetMessage(m: ServerMessage): void {
   switch (m.t) {
-    case 'rooms':
-      menus.showRooms(m.rooms);
-      break;
     case 'joined':
       window.clearInterval(lobbyTimer);
       world.setOnline(true);
@@ -115,8 +119,8 @@ function onNetMessage(m: ServerMessage): void {
       hud.toast(`ห้อง ${m.code}`);
       break;
     case 'error':
-      menus.onlineStatus(JOIN_ERRORS[m.reason]);
-      net.request({ t: 'list' });
+      net.close();
+      menus.onlineStatus(NET_ERRORS[m.reason]);
       break;
     case 'playerJoin':
       hud.toast(`${m.player.name} เข้าห้อง`);
@@ -163,12 +167,16 @@ function onNetMessage(m: ServerMessage): void {
 }
 
 function onNetClosed(): void {
-  if (world.online) {
-    backToMenu();
-    menus.showOnline();
-    menus.onlineStatus('หลุดจากเซิร์ฟเวอร์');
-  } else {
-    menus.roomBoardError();
+  backToMenu();
+  menus.showOnline();
+  menus.onlineStatus('ออกจากห้องแล้ว เพราะเจ้าของห้องออกหรือการเชื่อมต่อหลุด');
+}
+
+async function refreshRooms(): Promise<void> {
+  try {
+    menus.showRooms(await net.listRooms());
+  } catch (error) {
+    menus.roomBoardError(netMessage(error));
   }
 }
 
@@ -202,17 +210,17 @@ const menus = new Menus(uiRoot, settings, profile, {
   createRoom(name, maxPlayers) {
     rememberName(name);
     menus.onlineStatus('กำลังสร้างห้อง…');
-    net.request({ t: 'create', name, maxPlayers });
+    net.create(name, maxPlayers).catch((error) => menus.onlineStatus(netMessage(error)));
   },
   joinRoom(code, name) {
     rememberName(name);
-    menus.onlineStatus('กำลังเข้าห้อง…');
-    net.request({ t: 'join', code, name });
+    menus.onlineStatus('กำลังเข้าห้อง อาจใช้เวลาสักครู่…');
+    net.join(code, name).catch((error) => menus.onlineStatus(netMessage(error)));
   },
   openLobby() {
     window.clearInterval(lobbyTimer);
-    net.request({ t: 'list' });
-    lobbyTimer = window.setInterval(() => net.request({ t: 'list' }), LOBBY_REFRESH_MS);
+    void refreshRooms();
+    lobbyTimer = window.setInterval(() => void refreshRooms(), LOBBY_REFRESH_MS);
   },
   closeLobby() {
     window.clearInterval(lobbyTimer);
@@ -255,6 +263,12 @@ function handleEvents(): void {
         if (world.online) {
           net.send({ t: 'shot', origin: toVec(e.origin), dir: [e.dir.x, e.dir.y, e.dir.z], snare: e.snare });
         }
+        break;
+      case 'outOfBounds':
+        prevPos = { ...world.player.pos };
+        input.yaw = e.yaw;
+        input.pitch = 0;
+        hud.toast('กลับเข้าแมพแล้ว');
         break;
       case 'netHit':
         net.send({ t: 'hit', target: e.target, snare: e.snare });

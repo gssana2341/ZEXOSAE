@@ -1,29 +1,20 @@
-// Room rules: who is in a room, who is alive, and the score. The server owns all
-// of that. Sockets live in app.ts, so this file can be tested without a network.
+// Room rules: who is in a room, who is alive, and the score. This runs in the host's
+// browser. Connections live in host.ts, so this file can be tested without a network.
 
 import {
-  cleanCode,
   cleanName,
-  CODE_ALPHABET,
-  CODE_LENGTH,
   DEFAULT_ROOM_SIZE,
-  MAX_ROOM_SIZE,
-  MIN_ROOM_SIZE,
   PLAYER_HP,
   RESPAWN_MS,
   SPAWN_PROTECT_MS,
   type ClientMessage,
-  type JoinError,
   type PlayerInfo,
-  type RoomSummary,
   type ServerMessage,
   type Vec,
-} from '../src/net/protocol';
-import { createArena } from '../src/sim/map';
-import { TUNING } from '../src/sim/player';
+} from './protocol';
+import { createArena } from '../sim/map';
+import { TUNING } from '../sim/player';
 
-const MAX_ROOMS = 200;
-const MAX_LISTED_ROOMS = 40;
 /** Allows for lag between what the shooter saw and the last position the server has. */
 const HIT_RANGE_MARGIN = 25;
 /** Cooldowns are checked with some slack, so a late packet isn't treated as cheating. */
@@ -71,12 +62,6 @@ export class Room {
     readonly maxPlayers: number = DEFAULT_ROOM_SIZE,
     private readonly random: () => number = Math.random,
   ) {}
-
-  summary(): RoomSummary {
-    // The longest-staying player is the host, so the room keeps a name when its creator leaves.
-    const [host] = this.players.values();
-    return { code: this.code, host: host?.name ?? '', players: this.size, max: this.maxPlayers };
-  }
 
   get size(): number {
     return this.players.size;
@@ -224,55 +209,5 @@ export class Room {
     for (const p of this.players.values()) {
       if (p.id !== except) p.client.send(message);
     }
-  }
-}
-
-export class Lobby {
-  readonly rooms = new Map<string, Room>();
-
-  constructor(private readonly now: () => number = Date.now) {}
-
-  private newCode(): string {
-    for (;;) {
-      let code = '';
-      for (let i = 0; i < CODE_LENGTH; i += 1) {
-        code += CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)];
-      }
-      if (!this.rooms.has(code)) return code;
-    }
-  }
-
-  create(client: Client, name: string, maxPlayers: number): { room: Room; id: number } | JoinError {
-    if (this.rooms.size >= MAX_ROOMS) return 'busy';
-    const size = Math.max(MIN_ROOM_SIZE, Math.min(MAX_ROOM_SIZE, Math.floor(maxPlayers)));
-    const room = new Room(this.newCode(), this.now, size);
-    this.rooms.set(room.code, room);
-    const id = room.add(client, name);
-    return id === null ? 'busy' : { room, id };
-  }
-
-  join(client: Client, rawCode: string, name: string): { room: Room; id: number } | JoinError {
-    const room = this.rooms.get(cleanCode(rawCode));
-    if (!room) return 'not-found';
-    const id = room.add(client, name);
-    return id === null ? 'full' : { room, id };
-  }
-
-  /** Rooms with space first, busiest first, so the best room to join is at the top. */
-  list(): RoomSummary[] {
-    const open = (r: RoomSummary) => (r.players < r.max ? 1 : 0);
-    return [...this.rooms.values()]
-      .map((room) => room.summary())
-      .sort((a, b) => open(b) - open(a) || b.players - a.players)
-      .slice(0, MAX_LISTED_ROOMS);
-  }
-
-  leave(room: Room, id: number): void {
-    room.remove(id);
-    if (room.size === 0) this.rooms.delete(room.code);
-  }
-
-  tick(): void {
-    for (const room of this.rooms.values()) room.tick();
   }
 }

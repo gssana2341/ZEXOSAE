@@ -1,7 +1,16 @@
 // One practice session: the player, moving dummies and the timed ring course.
 
 import { createDanger, stepDanger, type DangerState } from './danger';
-import { createArena, raycast, RING_RADIUS, type GameMap, type V3 } from './map';
+import {
+  ARENA_FLOOR,
+  ARENA_LIMIT,
+  createArena,
+  raycast,
+  RING_RADIUS,
+  type GameMap,
+  type SpawnPoint,
+  type V3,
+} from './map';
 import {
   createPlayer,
   dummyCenter,
@@ -24,6 +33,8 @@ const DUMMY_RESPAWN = 4;
 /** In practice, each dummy aims at the player this long, this often, so the warning can be felt. */
 const DUMMY_AIM_TIME = 1.2;
 const DUMMY_AIM_EVERY = 6;
+/** Coming back into the arena online avoids spawns this close to another player. */
+const SAFE_RETURN_DISTANCE = 30;
 
 /** A web shot in flight. It goes exactly where it was aimed. */
 export interface Shot {
@@ -40,6 +51,7 @@ export type WorldEvent =
   | { type: 'hit'; id: number; ko: boolean }
   | { type: 'snare'; id: number }
   | { type: 'netHit'; target: number; snare: boolean }
+  | { type: 'outOfBounds'; yaw: number }
   | { type: 'ring'; index: number }
   | { type: 'lap'; time: number; best: boolean };
 
@@ -122,6 +134,37 @@ export class World {
       this.stepCourse(dt);
     }
     stepDanger(this.danger, this.player, this.dummies, this.map, dt);
+    this.keepInBounds();
+  }
+
+  /**
+   * The web can carry a player over the boundary walls. Coming back is not a
+   * death, so it costs nothing online. In practice it restarts the lap, or leaving
+   * the arena would be a shortcut.
+   */
+  private keepInBounds(): void {
+    const { x, y, z } = this.player.pos;
+    if (Math.abs(x) <= ARENA_LIMIT && Math.abs(z) <= ARENA_LIMIT && y >= ARENA_FLOOR) return;
+
+    if (this.online) {
+      const spawn = this.pickReturnSpawn();
+      this.respawnAt(spawn.pos, spawn.yaw);
+    } else {
+      this.reset();
+    }
+    this.events.push({ type: 'outOfBounds', yaw: this.player.yaw });
+  }
+
+  private pickReturnSpawn(): SpawnPoint {
+    const isClear = ({ pos }: SpawnPoint) =>
+      this.dummies.every(
+        (d) =>
+          d.respawnT > 0 ||
+          Math.hypot(d.pos.x - pos.x, d.pos.y - pos.y, d.pos.z - pos.z) >= SAFE_RETURN_DISTANCE,
+      );
+    const clear = this.map.spawns.filter(isClear);
+    const pool = clear.length ? clear : this.map.spawns;
+    return pool[Math.floor(Math.random() * pool.length)];
   }
 
   private stepShots(dt: number): void {
