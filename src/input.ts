@@ -16,8 +16,6 @@ const SLIDE_FROM_FLICK = 650;
 
 /** Holding the move button on the ground this long starts a swing. */
 const SWING_HOLD = 150;
-/** Holding the attack button this long fires a snare instead of a normal shot. */
-const SNARE_HOLD = 230;
 
 interface StickTouch {
   id: number;
@@ -49,9 +47,6 @@ export class InputManager {
 
   private touchSwing = false;
   private swingTimer = 0;
-  private snareTimer = 0;
-  private attackDown = false;
-  private snareFired = false;
 
   private airborne = false;
   private onWall = false;
@@ -61,9 +56,10 @@ export class InputManager {
     private readonly stickView: HTMLElement,
   ) {
     window.addEventListener('keydown', (e) => {
-      if (e.repeat) return;
-      this.press(e.code);
-      if (this.enabled && e.code !== 'Escape' && !e.ctrlKey && !e.metaKey) e.preventDefault();
+      // Held keys repeat, and each repeat must be blocked too, or holding Tab moves
+      // the browser's focus around the page.
+      if (this.enabled && e.code !== 'Escape' && !e.ctrlKey && !e.metaKey && !e.altKey) e.preventDefault();
+      if (!e.repeat) this.press(e.code);
     });
     window.addEventListener('keyup', (e) => this.release(e.code));
     window.addEventListener('mousedown', (e) => {
@@ -90,9 +86,7 @@ export class InputManager {
     this.stick = null;
     this.lookId = null;
     this.touchSwing = false;
-    this.attackDown = false;
     window.clearTimeout(this.swingTimer);
-    window.clearTimeout(this.snareTimer);
     this.stickView.classList.remove('on');
   }
 
@@ -169,7 +163,13 @@ export class InputManager {
 
   // ------------------------------------------------------------------ touch
 
-  bindTouch(surface: HTMLElement, moveButton: HTMLElement, attackButton: HTMLElement): void {
+  bindTouch(
+    surface: HTMLElement,
+    moveButton: HTMLElement,
+    attackButton: HTMLElement,
+    dashButton: HTMLElement,
+    snareButton: HTMLElement,
+  ): void {
     surface.addEventListener('pointerdown', (e) => {
       if (!this.enabled) return;
       e.preventDefault();
@@ -236,23 +236,17 @@ export class InputManager {
       },
     );
 
-    this.bindButton(
-      attackButton,
-      () => {
-        if (!this.enabled) return;
-        this.attackDown = true;
-        this.snareFired = false;
-        this.snareTimer = window.setTimeout(() => {
-          this.snareFired = true;
-          this.pressed.add('snare');
-        }, SNARE_HOLD);
-      },
-      () => {
-        window.clearTimeout(this.snareTimer);
-        if (this.attackDown && !this.snareFired) this.pressed.add('shoot');
-        this.attackDown = false;
-      },
-    );
+    const tap = (el: HTMLElement, action: Action) =>
+      this.bindButton(
+        el,
+        () => {
+          if (this.enabled) this.pressed.add(action);
+        },
+        () => undefined,
+      );
+    tap(attackButton, 'shoot');
+    tap(dashButton, 'dash');
+    tap(snareButton, 'snare');
   }
 
   private bindButton(el: HTMLElement, onDown: () => void, onUp: () => void): void {

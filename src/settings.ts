@@ -14,6 +14,16 @@ export type Action =
   | 'reset'
   | 'scores';
 
+export type ControlId = 'move' | 'attack' | 'dash' | 'snare' | 'pause' | 'scores';
+
+export interface ControlLayout {
+  /** Centre of the control as a share of the screen. Unset keeps its default place. */
+  x?: number;
+  y?: number;
+  scale: number;
+  opacity: number;
+}
+
 export interface Settings {
   quality: Quality;
   fov: number;
@@ -22,6 +32,7 @@ export interface Settings {
   aimAssist: boolean;
   reduceMotion: boolean;
   swapButtons: boolean;
+  touchLayout: Partial<Record<ControlId, ControlLayout>>;
   keys: Record<Action, string>;
   /** Only present in saved settings. */
   version?: number;
@@ -57,6 +68,7 @@ function defaults(): Settings {
     aimAssist: true,
     reduceMotion: false,
     swapButtons: false,
+    touchLayout: {},
     keys: {
       forward: 'KeyW',
       back: 'KeyS',

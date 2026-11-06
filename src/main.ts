@@ -1,4 +1,5 @@
 import { InputManager } from './input';
+import { blockPageZoom } from './mobile';
 import { NetClient } from './net/client';
 import { cleanCode, CODE_LENGTH, STATE_HZ, type ServerMessage, type Vec } from './net/protocol';
 import { SignalError, type NetError } from './net/signal';
@@ -25,7 +26,9 @@ const world = new World(loadBestLap());
 const view = new GameView(canvas, world.map, settings, !touchDevice);
 const hud = new Hud(uiRoot, view, settings);
 const input = new InputManager(settings, hud.stick);
-input.bindTouch(hud.touch, hud.moveButton, hud.attackButton);
+input.bindTouch(hud.touch, hud.moveButton, hud.attackButton, hud.dashButton, hud.snareButton);
+
+blockPageZoom();
 
 let state: State = 'menu';
 let accumulator = 0;
@@ -56,6 +59,12 @@ const syncLook = (p: Player) => {
   input.pitch = p.pitch;
 };
 
+/** While waiting to respawn, the world turns grey and the player can't act. */
+function setKoBy(name: string | null): void {
+  koBy = name;
+  canvas.classList.toggle('ko', name !== null);
+}
+
 function play(): void {
   state = 'playing';
   menus.hide();
@@ -82,7 +91,7 @@ function pause(): void {
 
 function backToMenu(): void {
   state = 'menu';
-  koBy = null;
+  setKoBy(null);
   input.enabled = false;
   input.clear();
   world.setOnline(false);
@@ -132,7 +141,7 @@ function onNetMessage(m: ServerMessage): void {
       if (m.target === net.id) {
         view.hitFeedback(m.ko);
         if (m.ko) {
-          koBy = net.players.get(m.by)?.name ?? '';
+          setKoBy(net.players.get(m.by)?.name ?? '');
           profile.deaths += 1;
           saveProfile(profile);
         } else {
@@ -159,7 +168,7 @@ function onNetMessage(m: ServerMessage): void {
       break;
     case 'respawn':
       if (m.id === net.id) {
-        koBy = null;
+        setKoBy(null);
         spawnAt(m.pos, m.yaw);
       }
       break;

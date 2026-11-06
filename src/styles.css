@@ -27,6 +27,23 @@ body {
   font-family: 'Noto Sans Thai', 'Leelawadee UI', 'Thonburi', system-ui, sans-serif;
   user-select: none;
   -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  touch-action: none;
+}
+
+.menu,
+.panel,
+.settings,
+.room-list,
+.scoreboard {
+  touch-action: pan-y;
+}
+
+input,
+select {
+  touch-action: manipulation;
 }
 
 #game {
@@ -36,6 +53,11 @@ body {
   height: 100%;
   display: block;
   touch-action: none;
+  transition: filter 0.2s;
+}
+
+#game.ko {
+  filter: grayscale(1) brightness(0.72);
 }
 
 /* HUD */
@@ -746,4 +768,116 @@ select {
   .panel.online {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+.control-editor {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  background: rgba(8, 12, 20, 0.6);
+  touch-action: none;
+}
+
+.control-editor .touch {
+  display: block;
+}
+
+.editable {
+  display: grid;
+  place-items: center;
+  cursor: grab;
+  pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.editable.selected {
+  outline: 3px solid var(--orange);
+  outline-offset: 3px;
+}
+
+.editor-panel {
+  position: absolute;
+  left: 50%;
+  top: calc(10px + var(--safe-t));
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 14px;
+  width: min(460px, 62vw);
+  padding: 10px 14px;
+  transform: translateX(-50%);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  font-size: 13px;
+  background: var(--panel);
+}
+
+.editor-panel p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--muted);
+}
+
+.editor-panel strong {
+  grid-column: 1 / -1;
+  color: var(--orange);
+}
+
+.editor-slider {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.editor-slider input {
+  width: 100%;
+  accent-color: var(--teal);
+}
+
+.editor-actions {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.editor-actions .btn {
+  min-height: 40px;
+}
+
+@media (max-width: 620px) {
+  .editor-panel {
+    width: calc(100vw - 32px);
+  }
+}
+
+.pad-small {
+  width: 62px;
+  height: 62px;
+  font-size: 14px;
+}
+
+.pad.cooling {
+  filter: brightness(0.5);
+}
+
+.pad-dash {
+  right: calc(26px + var(--safe-r));
+  bottom: calc(124px + var(--safe-b));
+}
+
+.pad-snare {
+  right: calc(104px + var(--safe-r));
+  bottom: calc(160px + var(--safe-b));
+}
+
+.touch.swapped .pad-dash {
+  right: auto;
+  left: calc(26px + var(--safe-l));
+}
+
+.touch.swapped .pad-snare {
+  right: auto;
+  left: calc(104px + var(--safe-l));
 }

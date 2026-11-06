@@ -9,6 +9,8 @@ import {
   type PlayerInfo,
   type RoomSummary,
 } from './net/protocol';
+import { openControlEditor } from './control-editor';
+import { el, styleControl } from './dom';
 import type { Profile } from './profile';
 import { raycast } from './sim/map';
 import { dummyCenter, eyePosition, totalSpeed, TUNING } from './sim/player';
@@ -24,17 +26,6 @@ import {
   type Quality,
   type Settings,
 } from './settings';
-
-function el<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  className = '',
-  text = '',
-): HTMLElementTagNameMap[K] {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text) node.textContent = text;
-  return node;
-}
 
 export const formatTime = (t: number): string => {
   const minutes = Math.floor(t / 60);
@@ -60,7 +51,9 @@ export class Hud {
   readonly stick = el('div', 'stick');
   readonly moveButton = el('button', 'pad pad-move', 'โหน');
   readonly attackButton = el('button', 'pad pad-attack', 'ยิง');
-  readonly pauseButton = el('button', 'pause-button', 'พัก');
+  readonly dashButton = el('button', 'pad pad-small pad-dash', 'พุ่ง');
+  readonly snareButton = el('button', 'pad pad-small pad-snare', 'ใยรัด');
+  readonly pauseButton = el('button', 'pause-button', 'ตั้งค่า');
   readonly scoresButton = el('button', 'scores-button', 'คะแนน');
   /** Set each frame while the player holds the scoreboard key. */
   scoresKey = false;
@@ -78,6 +71,7 @@ export class Hud {
   private readonly best = el('div', 'best');
   private readonly rings = el('div', 'rings');
   private readonly kos = el('div', 'kos');
+  private readonly skills = el('div', 'skills');
   private readonly dash = el('div', 'cooldown');
   private readonly snare = el('div', 'cooldown');
   private readonly anchor = el('div', 'marker anchor');
@@ -116,12 +110,11 @@ export class Hud {
       this.nameTags.push(tag);
     }
 
-    const skills = el('div', 'skills');
     this.dash.dataset.label = 'พุ่ง';
     this.snare.dataset.label = 'ใยรัด';
-    skills.append(this.dash, this.snare);
+    this.skills.append(this.dash, this.snare);
 
-    this.touch.append(this.stick, this.moveButton, this.attackButton);
+    this.touch.append(this.stick, this.moveButton, this.attackButton, this.dashButton, this.snareButton);
     this.root.append(
       this.speedLines,
       ...Object.values(this.edges),
@@ -133,7 +126,7 @@ export class Hud {
       this.hitMark,
       course,
       speed,
-      skills,
+      this.skills,
       ...this.nameTags,
       this.koNote,
       this.toastBox,
@@ -150,6 +143,16 @@ export class Hud {
     this.touch.classList.toggle('swapped', this.settings.swapButtons);
     this.pauseButton.hidden = !isTouchDevice();
     this.scoresButton.hidden = true;
+    // On touch the buttons themselves show when a skill is ready.
+    this.skills.style.display = isTouchDevice() ? 'none' : '';
+
+    const layout = this.settings.touchLayout;
+    styleControl(this.moveButton, layout.move);
+    styleControl(this.attackButton, layout.attack);
+    styleControl(this.dashButton, layout.dash);
+    styleControl(this.snareButton, layout.snare);
+    styleControl(this.pauseButton, layout.pause);
+    styleControl(this.scoresButton, layout.scores);
   }
 
   setVisible(visible: boolean): void {
@@ -202,6 +205,8 @@ export class Hud {
 
     this.dash.style.setProperty('--ready', String(1 - p.dashCdT / TUNING.dashCooldown));
     this.snare.style.setProperty('--ready', String(1 - p.snareCdT / TUNING.snareCooldown));
+    this.dashButton.classList.toggle('cooling', p.dashCdT > 0);
+    this.snareButton.classList.toggle('cooling', p.snareCdT > 0);
 
     this.place(this.anchor, p.mode === 'swing' ? null : p.anchorPreview);
 
@@ -534,10 +539,10 @@ export class Menus {
     const k = this.settings.keys;
     const rows: Array<[string, string]> = isTouchDevice()
       ? [
-          ['นิ้วซ้าย', 'ลากเพื่อเดิน ปัดเร็วๆ เพื่อพุ่งหลบ ปัดลงเพื่อสไลด์'],
+          ['นิ้วซ้าย', 'ลากเพื่อเดิน ปัดลงเร็วๆ เพื่อสไลด์'],
           ['นิ้วขวา', 'ลากเพื่อหันกล้อง'],
           ['ปุ่มโหน', 'แตะเพื่อกระโดด กดค้างเพื่อโหน'],
-          ['ปุ่มยิง', 'แตะเพื่อยิงใย กดค้างเพื่อยิงใยรัด'],
+          ['ปุ่มอื่น', 'ยิง พุ่ง และใยรัด แตะเพื่อใช้'],
         ]
       : [
           ['เดิน', [k.forward, k.left, k.back, k.right].map(keyName).join(' ')],
@@ -647,6 +652,19 @@ export class Menus {
         changed();
       }),
     );
+
+    if (isTouchDevice()) {
+      panel.append(
+        this.button('ปรับปุ่มบนจอ', () => {
+          const parent = this.root.parentElement!;
+          this.hide();
+          openControlEditor(parent, s, () => {
+            changed();
+            this.showSettings(back);
+          });
+        }),
+      );
+    }
 
     if (!isTouchDevice()) {
       panel.append(el('h3', '', 'ปุ่มคีย์บอร์ดและเมาส์'), this.keyBindings(changed));

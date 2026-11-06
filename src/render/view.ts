@@ -1,8 +1,9 @@
 // Everything drawn in 3D. It reads the simulation but never changes it.
 
 import * as THREE from 'three';
+import { bodyPose, type BodyPose } from './body-pose';
 import { RING_RADIUS, type Box, type BoxKind, type GameMap, type V3 } from '../sim/map';
-import { eyePosition, totalSpeed, type Player } from '../sim/player';
+import { eyePosition, totalSpeed, type Dummy, type Player } from '../sim/player';
 import type { World } from '../sim/world';
 import type { Quality, Settings } from '../settings';
 
@@ -15,6 +16,7 @@ const KIND_COLORS: Record<BoxKind, string[]> = {
 };
 
 const SKY = '#a8d4f0';
+const UP = new THREE.Vector3(0, 1, 0);
 const GRID_METRES = 4;
 const MAX_SHOTS = 12;
 const MAX_OTHER_PLAYERS = 15;
@@ -107,29 +109,87 @@ function buildArena(map: GameMap): THREE.Mesh {
   return mesh;
 }
 
+interface Limb {
+  upper: THREE.Group;
+  lower: THREE.Group;
+  /** The end of the limb, where a web leaves the hand. */
+  tip: THREE.Object3D;
+}
+
 interface DummyView {
   group: THREE.Group;
-  body: THREE.MeshLambertMaterial;
+  /** Tips the whole body. Pivots at the chest, so it hangs naturally from a web. */
+  rig: THREE.Group;
+  armLeft: Limb;
+  armRight: Limb;
+  legLeft: Limb;
+  legRight: Limb;
+  pose: BodyPose;
+  lastPos: THREE.Vector3;
+  velocity: THREE.Vector3;
   wrap: THREE.Mesh;
   web: THREE.Mesh;
 }
 
+const RIG_HEIGHT = 1.2;
+/** A bigger jump than this in one frame is a respawn, not movement. */
+const TELEPORT_DISTANCE = 6;
+
+function buildLimb(
+  parent: THREE.Object3D,
+  x: number,
+  y: number,
+  width: number,
+  length: number,
+  upperMaterial: THREE.Material,
+  lowerMaterial: THREE.Material,
+): Limb {
+  const segment = (material: THREE.Material) => {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(width, length, width * 1.15), material);
+    mesh.position.y = -length / 2;
+    return mesh;
+  };
+
+  const upper = new THREE.Group();
+  upper.position.set(x, y, 0);
+  upper.add(segment(upperMaterial));
+
+  const lower = new THREE.Group();
+  lower.position.y = -length;
+  lower.add(segment(lowerMaterial));
+  upper.add(lower);
+
+  const tip = new THREE.Object3D();
+  tip.position.y = -length;
+  lower.add(tip);
+
+  parent.add(upper);
+  return { upper, lower, tip };
+}
+
 function buildDummy(): DummyView {
   const group = new THREE.Group();
+  const rig = new THREE.Group();
+  rig.position.y = RIG_HEIGHT;
+  group.add(rig);
+
   const body = new THREE.MeshLambertMaterial({ color: '#e5484d' });
   const dark = new THREE.MeshLambertMaterial({ color: '#23293a' });
 
-  const part = (w: number, h: number, d: number, y: number, x: number, m: THREE.Material) => {
+  const part = (w: number, h: number, d: number, y: number, m: THREE.Material) => {
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
-    mesh.position.set(x, y, 0);
-    group.add(mesh);
+    mesh.position.y = y - RIG_HEIGHT;
+    rig.add(mesh);
   };
-  part(0.62, 0.72, 0.34, 1.12, 0, body);
-  part(0.42, 0.4, 0.42, 1.68, 0, dark);
-  part(0.24, 0.76, 0.28, 0.38, -0.17, dark);
-  part(0.24, 0.76, 0.28, 0.38, 0.17, dark);
-  part(0.18, 0.7, 0.24, 1.1, -0.42, body);
-  part(0.18, 0.7, 0.24, 1.1, 0.42, body);
+  part(0.62, 0.72, 0.34, 1.12, body);
+  part(0.42, 0.4, 0.42, 1.68, dark);
+
+  const shoulder = 1.42 - RIG_HEIGHT;
+  const hip = 0.76 - RIG_HEIGHT;
+  const armLeft = buildLimb(rig, -0.42, shoulder, 0.17, 0.36, body, dark);
+  const armRight = buildLimb(rig, 0.42, shoulder, 0.17, 0.36, body, dark);
+  const legLeft = buildLimb(rig, -0.17, hip, 0.22, 0.38, dark, dark);
+  const legRight = buildLimb(rig, 0.17, hip, 0.22, 0.38, dark, dark);
 
   const wrap = new THREE.Mesh(
     new THREE.BoxGeometry(1.05, 2.0, 0.8),
@@ -145,7 +205,19 @@ function buildDummy(): DummyView {
   );
   web.visible = false;
 
-  return { group, body, wrap, web };
+  return {
+    group,
+    rig,
+    armLeft,
+    armRight,
+    legLeft,
+    legRight,
+    pose: bodyPose({ speed: 0, forwardSpeed: 0, verticalSpeed: 0, rope: null, time: 0 }),
+    lastPos: new THREE.Vector3(),
+    velocity: new THREE.Vector3(),
+    wrap,
+    web,
+  };
 }
 
 function armMesh(sleeve: THREE.Material, glove: THREE.Material, renderOrder: number): THREE.Group {
@@ -426,17 +498,61 @@ export class GameView {
 
       view.group.position.set(d.pos.x, d.pos.y, d.pos.z);
       view.wrap.visible = d.snareT > 0;
-      if (d.yaw === undefined) view.group.rotation.y += dt * 0.8;
-      else view.group.rotation.y = d.yaw;
+      this.animateBody(view, d, dt);
 
       if (d.anchor) {
-        const from = this.hand.set(d.pos.x, d.pos.y + 1.4, d.pos.z);
+        view.group.updateMatrixWorld(true);
+        const from = view.armRight.tip.getWorldPosition(this.hand);
         const to = this.tmp.set(d.anchor.x, d.anchor.y, d.anchor.z);
         view.web.position.copy(from).lerp(to, 0.5);
         view.web.scale.set(0.05, 0.05, from.distanceTo(to));
         view.web.lookAt(to);
       }
     });
+  }
+
+  private animateBody(view: DummyView, d: Dummy, dt: number): void {
+    if (dt <= 0) return;
+
+    const moved = this.tmp.copy(view.group.position).sub(view.lastPos);
+    view.lastPos.copy(view.group.position);
+    if (moved.length() > TELEPORT_DISTANCE) moved.set(0, 0, 0);
+    // Positions arrive in steps online, so velocity is smoothed before it drives the body.
+    view.velocity.lerp(moved.divideScalar(dt), 1 - Math.exp(-10 * dt));
+
+    const speed = Math.hypot(view.velocity.x, view.velocity.z);
+    if (d.yaw !== undefined) view.group.rotation.y = d.yaw;
+    else if (speed > 0.5) view.group.rotation.y = Math.atan2(-view.velocity.x, -view.velocity.z);
+
+    const yaw = view.group.rotation.y;
+    const local = this.tmp.copy(view.velocity).applyAxisAngle(UP, -yaw);
+    const forwardSpeed = -local.z;
+
+    let rope: { x: number; y: number; z: number } | null = null;
+    if (d.anchor) {
+      const dir = this.tmp2
+        .set(d.anchor.x - d.pos.x, d.anchor.y - d.pos.y - 1.4, d.anchor.z - d.pos.z)
+        .normalize()
+        .applyAxisAngle(UP, -yaw);
+      rope = { x: dir.x, y: dir.y, z: dir.z };
+    }
+
+    const want = bodyPose({ speed, forwardSpeed, verticalSpeed: view.velocity.y, rope, time: this.time });
+    const k = 1 - Math.exp(-14 * dt);
+    const pose = view.pose;
+    for (const joint of Object.keys(pose) as Array<keyof BodyPose>) {
+      pose[joint] += (want[joint] - pose[joint]) * k;
+    }
+
+    view.rig.rotation.set(pose.pitch, 0, pose.roll);
+    view.armLeft.upper.rotation.x = pose.armLeft;
+    view.armRight.upper.rotation.x = pose.armRight;
+    view.armLeft.lower.rotation.x = pose.elbowLeft;
+    view.armRight.lower.rotation.x = pose.elbowRight;
+    view.legLeft.upper.rotation.x = pose.legLeft;
+    view.legRight.upper.rotation.x = pose.legRight;
+    view.legLeft.lower.rotation.x = pose.kneeLeft;
+    view.legRight.lower.rotation.x = pose.kneeRight;
   }
 
   private drawWeb(p: Player): void {
