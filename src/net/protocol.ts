@@ -42,12 +42,14 @@ export type ClientMessage =
   | { t: 'join'; code: string; name: string }
   | { t: 'state'; pos: Vec; yaw: number; pitch: number; anchor: Vec | null }
   | { t: 'shot'; origin: Vec; dir: Vec; snare: boolean }
-  | { t: 'hit'; target: number; snare: boolean };
+  | { t: 'hit'; target: number; snare: boolean }
+  | { t: 'ping'; at: number };
 
 
 export type ServerMessage =
   | { t: 'joined'; code: string; id: number; players: PlayerInfo[]; pos: Vec; yaw: number }
   | { t: 'error'; reason: 'full' }
+  | { t: 'pong'; at: number }
   | { t: 'playerJoin'; player: PlayerInfo }
   | { t: 'playerLeave'; id: number }
   | { t: 'snapshot'; players: PlayerSnapshot[] }
@@ -87,6 +89,8 @@ export function parseClientMessage(raw: string): ClientMessage | null {
       return isNumber(m.target) && typeof m.snare === 'boolean'
         ? { t: 'hit', target: m.target, snare: m.snare }
         : null;
+    case 'ping':
+      return isNumber(m.at) ? { t: 'ping', at: m.at } : null;
     default:
       return null;
   }

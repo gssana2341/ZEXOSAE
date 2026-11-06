@@ -15,15 +15,20 @@ function devRoomApi(): Plugin {
     name: 'dev-room-api',
     configureServer(server) {
       server.middlewares.use('/api/rooms', async (req, res) => {
-        const { handle } = await server.ssrLoadModule('/api/rooms.ts');
-        const body = req.method === 'POST' ? await readBody(req) : undefined;
-        const response: Response = await handle(
-          new Request('http://localhost/api/rooms', { method: req.method, body }),
-          store,
-        );
-        res.statusCode = response.status;
-        res.setHeader('Content-Type', 'application/json');
-        res.end(await response.text());
+        try {
+          const { handle } = await server.ssrLoadModule('/api/rooms.ts');
+          const body = req.method === 'POST' ? await readBody(req) : undefined;
+          const response: Response = await handle(
+            new Request('http://localhost/api/rooms', { method: req.method, body }),
+            store,
+          );
+          res.statusCode = response.status;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(await response.text());
+        } catch {
+          // Closing a tab mid-request lands here. It shouldn't stop the dev server.
+          res.destroy();
+        }
       });
     },
   };

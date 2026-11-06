@@ -81,7 +81,7 @@ export class HostSession {
 
     let playerId: number | null = null;
     const client: Client = {
-      send: (m: ServerMessage) => link.send(JSON.stringify(m), m.t === 'snapshot'),
+      send: (m: ServerMessage) => link.send(JSON.stringify(m), m.t === 'snapshot' || m.t === 'pong'),
     };
 
     link.onMessage = (raw) => {

@@ -35,12 +35,20 @@ export const formatTime = (t: number): string => {
 
 // ---------------------------------------------------------------------- HUD
 
+export function pingQuality(ping: number | null): 'good' | 'fair' | 'bad' {
+  if (ping === null || ping >= 150) return 'bad';
+  return ping >= 80 ? 'fair' : 'good';
+}
+
 export interface OnlineHud {
   code: string;
   myId: number;
   players: PlayerInfo[];
   /** Set while waiting to respawn. */
   koBy: string | null;
+  /** Round trip to the host in milliseconds, or null with no fresh reading. */
+  ping: number | null;
+  isHost: boolean;
 }
 
 export class Hud {
@@ -84,6 +92,7 @@ export class Hud {
   private scoreboardKey = '';
   private scoresTapped = false;
   private readonly koNote = el('div', 'ko-note');
+  private readonly pingLabel = el('div', 'ping');
   private readonly nameTags: HTMLElement[] = [];
   private hitTimer = 0;
   private toastTimer = 0;
@@ -131,6 +140,7 @@ export class Hud {
       this.skills,
       ...this.nameTags,
       this.koNote,
+      this.pingLabel,
       this.toastBox,
       this.scoreboard,
       this.pauseButton,
@@ -204,6 +214,7 @@ export class Hud {
       this.scoreboard.classList.remove('on');
       this.scoresButton.hidden = true;
       this.koNote.textContent = '';
+      this.pingLabel.textContent = '';
       for (const tag of this.nameTags) tag.style.display = 'none';
     }
 
@@ -220,6 +231,15 @@ export class Hud {
 
     if (world.online) this.ring.style.display = 'none';
     else this.placeClamped(this.ring, world.map.rings[world.ringIndex]);
+  }
+
+  private updatePing({ ping, isHost }: OnlineHud): void {
+    this.pingLabel.textContent = isHost
+      ? 'ปิง 0 ms (โฮสต์)'
+      : ping === null
+        ? 'ปิง -- ms'
+        : `ปิง ${ping} ms`;
+    this.pingLabel.dataset.quality = pingQuality(ping);
   }
 
   private updateScoreboard(online: OnlineHud): void {
@@ -256,6 +276,7 @@ export class Hud {
 
     this.scoresButton.hidden = !isTouchDevice();
     this.updateScoreboard(online);
+    this.updatePing(online);
 
     this.koNote.textContent =
       online.koBy === null ? '' : `ถูก KO โดย ${online.koBy || 'ผู้เล่น'} กำลังเกิดใหม่…`;

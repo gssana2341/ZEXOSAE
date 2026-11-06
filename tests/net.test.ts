@@ -193,6 +193,21 @@ describe('room rules', () => {
   });
 });
 
+describe('ping', () => {
+  it('sends a ping straight back to the player who asked', () => {
+    const { room, a, b, idA } = roomWithTwo();
+    room.handle(idA, { t: 'ping', at: 123.5 });
+    expect(a.last('pong')).toEqual({ t: 'pong', at: 123.5 });
+    expect(b.last('pong')).toBeUndefined();
+  });
+
+  it('rejects a ping with no time', () => {
+    expect(parseClientMessage('{"t":"ping"}')).toBeNull();
+    expect(parseClientMessage('{"t":"ping","at":"soon"}')).toBeNull();
+    expect(parseClientMessage('{"t":"ping","at":5}')).toEqual({ t: 'ping', at: 5 });
+  });
+});
+
 describe('message checks', () => {
   it('accepts valid messages', () => {
     expect(parseClientMessage('{"t":"state","pos":[1,2,3],"yaw":0,"pitch":0,"anchor":null}')?.t).toBe('state');

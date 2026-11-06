@@ -25,6 +25,11 @@ const MAX_SAMPLES = 12;
 const ANSWER_TIMEOUT_MS = 12000;
 const ANSWER_POLL_MS = 800;
 const CONNECT_TIMEOUT_MS = 12000;
+const PING_EVERY_MS = 1000;
+/** With no reply for this long, the last reading no longer means anything. */
+const PING_STALE_MS = 3000;
+/** How much each new reading moves the shown ping, so the number doesn't flicker. */
+const PING_SMOOTHING = 0.3;
 
 interface Sample extends PlayerSnapshot {
   at: number;
@@ -56,11 +61,25 @@ export class NetClient {
   private readonly dummies = new Map<number, Dummy>();
   /** When each frozen player thaws, on the performance.now() clock. */
   private readonly frozenUntil = new Map<number, number>();
+  private pingTimer = 0;
+  private pingMs: number | null = null;
+  private lastPongAt = 0;
 
   constructor(
     private readonly onMessage: (m: ServerMessage) => void,
     private readonly onClosed: () => void,
   ) {}
+
+  get isHost(): boolean {
+    return this.host !== null;
+  }
+
+  /** Round trip to the host in milliseconds, or null when there is no fresh reading. */
+  get ping(): number | null {
+    if (this.host) return 0;
+    if (this.pingMs === null || performance.now() - this.lastPongAt > PING_STALE_MS) return null;
+    return Math.round(this.pingMs);
+  }
 
   listRooms(): Promise<RoomSummary[]> {
     return listRooms();
@@ -106,6 +125,10 @@ export class NetClient {
       this.onClosed();
     };
     this.send({ t: 'join', code, name });
+    this.pingTimer = window.setInterval(
+      () => this.send({ t: 'ping', at: performance.now() }),
+      PING_EVERY_MS,
+    );
   }
 
   private async waitForAnswer(box: string, attempt: number): Promise<string> {
@@ -129,6 +152,8 @@ export class NetClient {
   }
 
   private reset(): void {
+    window.clearInterval(this.pingTimer);
+    this.pingMs = null;
     this.players.clear();
     this.samples.clear();
     this.dummies.clear();
@@ -138,11 +163,17 @@ export class NetClient {
 
   send(message: ClientMessage): void {
     if (this.host) this.host.fromLocal(message);
-    else this.link?.send(JSON.stringify(message), message.t === 'state');
+    else this.link?.send(JSON.stringify(message), message.t === 'state' || message.t === 'ping');
   }
 
   private receive(m: ServerMessage): void {
     switch (m.t) {
+      case 'pong': {
+        const reading = performance.now() - m.at;
+        this.pingMs = this.pingMs === null ? reading : this.pingMs + (reading - this.pingMs) * PING_SMOOTHING;
+        this.lastPongAt = performance.now();
+        return;
+      }
       case 'joined':
         this.id = m.id;
         this.code = m.code;

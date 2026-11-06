@@ -891,3 +891,25 @@ select {
 .frozen-screen.on {
   display: block;
 }
+
+.ping {
+  position: absolute;
+  left: calc(16px + var(--safe-l));
+  bottom: calc(8px + var(--safe-b));
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85);
+}
+
+.ping[data-quality='good'] {
+  color: #5ff0a0;
+}
+
+.ping[data-quality='fair'] {
+  color: #ffd75e;
+}
+
+.ping[data-quality='bad'] {
+  color: #ff7a70;
+}

@@ -113,6 +113,9 @@ export class Room {
     if (!player) return;
 
     switch (m.t) {
+      case 'ping':
+        player.client.send({ t: 'pong', at: m.at });
+        break;
       case 'state':
         if (player.alive) {
           player.pos = m.pos;

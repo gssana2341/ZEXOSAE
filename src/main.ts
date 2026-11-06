@@ -347,6 +347,8 @@ function frame(now: number): void {
         myId: net.id,
         players: [...net.players.values()],
         koBy,
+        ping: net.ping,
+        isHost: net.isHost,
       };
     }
     hud.update(world);
