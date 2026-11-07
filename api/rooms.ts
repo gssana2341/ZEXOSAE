@@ -3,7 +3,15 @@
 // host's browser directly. Vercel doesn't keep memory between requests, so this
 // state lives in Redis.
 
-import { isGameMode, type GameMode } from '../src/sim/game-modes';
+import type { GameMode } from '../src/sim/game-modes';
+
+// Keep the function self-contained at runtime. Vercel executes the emitted Node
+// module directly, so an extensionless import of a TypeScript source can fail.
+// The type check still requires this list to match the game's modes.
+const ROOM_MODES = { deathmatch: true, teams: true, control: true, crown: true } satisfies Record<GameMode, true>;
+function isGameMode(value: unknown): value is GameMode {
+  return typeof value === 'string' && Object.hasOwn(ROOM_MODES, value);
+}
 
 export interface RoomRecord {
   code: string;

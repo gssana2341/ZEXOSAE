@@ -1,6 +1,7 @@
 import { InputManager } from './input';
 import { blockPageZoom } from './mobile';
 import { NetClient } from './net/client';
+import { LobbyPoller } from './net/lobby-poller';
 import { cleanCode, CODE_LENGTH, STATE_HZ, type ServerMessage, type Vec } from './net/protocol';
 import { CROWN_CARRY_HEIGHT } from './sim/game-modes';
 import { SignalError, type NetError } from './net/signal';
@@ -51,7 +52,6 @@ const frameLimiter = new FrameLimiter();
 /** Set while waiting to respawn: the name of whoever got the KO. */
 let koBy: string | null = null;
 let stateTimer = 0;
-let lobbyTimer = 0;
 
 const toV3 = (v: Vec): V3 => ({ x: v[0], y: v[1], z: v[2] });
 const toVec = (v: V3): Vec => [
@@ -134,6 +134,7 @@ const NET_ERRORS: Record<NetError, string> = {
   full: 'ห้องเต็มแล้ว',
   busy: 'ระบบห้องไม่ว่าง ลองอีกครั้งภายหลัง',
   'no-store': 'ระบบห้องยังไม่พร้อม ต้องเชื่อม Redis ใน Vercel ก่อน',
+  unavailable: 'ระบบห้องขัดข้องชั่วคราว กรุณาลองอีกครั้ง',
   connect: 'เชื่อมต่อกับเจ้าของห้องไม่ได้ เครือข่ายอาจบล็อกการต่อตรง',
   network: 'ติดต่อระบบห้องไม่ได้ เช็กอินเทอร์เน็ตแล้วลองใหม่',
 };
@@ -144,7 +145,7 @@ const netMessage = (error: unknown) =>
 function onNetMessage(m: ServerMessage): void {
   switch (m.t) {
     case 'joined':
-      window.clearInterval(lobbyTimer);
+      lobby.stop();
       world.setOnline(true);
       spawnAt(m.pos, m.yaw);
       play();
@@ -220,15 +221,16 @@ function onNetClosed(): void {
   menus.onlineStatus('ออกจากห้องแล้ว เพราะเจ้าของห้องออกหรือการเชื่อมต่อหลุด');
 }
 
-async function refreshRooms(): Promise<void> {
-  try {
-    menus.showRooms(await net.listRooms());
-  } catch (error) {
-    menus.roomBoardError(netMessage(error));
-  }
-}
-
 const net = new NetClient(onNetMessage, onNetClosed);
+const lobby = new LobbyPoller(
+  () => net.listRooms(),
+  (rooms) => menus.showRooms(rooms),
+  (error) => menus.roomBoardError(netMessage(error), () => {
+    menus.roomBoardLoading();
+    lobby.start();
+  }),
+  LOBBY_REFRESH_MS,
+);
 
 function rememberName(name: string): void {
   profile.name = name.trim();
@@ -271,12 +273,10 @@ const menus = new Menus(uiRoot, settings, profile, {
     net.join(code, name).catch((error) => menus.onlineStatus(netMessage(error)));
   },
   openLobby() {
-    window.clearInterval(lobbyTimer);
-    void refreshRooms();
-    lobbyTimer = window.setInterval(() => void refreshRooms(), LOBBY_REFRESH_MS);
+    lobby.start();
   },
   closeLobby() {
-    window.clearInterval(lobbyTimer);
+    lobby.stop();
     net.close();
   },
   saveName: rememberName,

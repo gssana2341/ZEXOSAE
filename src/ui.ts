@@ -567,8 +567,14 @@ export class Menus {
     );
   }
 
-  roomBoardError(text: string): void {
-    this.roomList.replaceChildren(el('p', 'empty', text));
+  roomBoardLoading(): void {
+    this.roomList.replaceChildren(el('p', 'empty', 'กำลังโหลดรายการห้อง…'));
+  }
+
+  roomBoardError(text: string, retry: () => void): void {
+    const button = el('button', 'key', 'ลองอีกครั้ง');
+    button.addEventListener('click', retry);
+    this.roomList.replaceChildren(el('p', 'empty', text), button);
   }
 
   showOnline(code = ''): void {
@@ -659,7 +665,7 @@ export class Menus {
     );
 
     const board = el('div', 'room-board');
-    this.roomList.replaceChildren(el('p', 'empty', 'กำลังโหลดรายการห้อง…'));
+    this.roomBoardLoading();
     board.append(el('h2', '', 'ห้องที่เปิดอยู่'), this.roomList);
 
     panel.append(form, board);

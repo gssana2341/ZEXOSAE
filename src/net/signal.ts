@@ -5,7 +5,7 @@ import type { GameMode } from '../sim/game-modes';
 
 const API = '/api/rooms';
 
-export type NetError = 'not-found' | 'full' | 'busy' | 'no-store' | 'connect' | 'network';
+export type NetError = 'not-found' | 'full' | 'busy' | 'no-store' | 'unavailable' | 'connect' | 'network';
 
 export class SignalError extends Error {
   constructor(readonly reason: NetError) {
@@ -26,7 +26,7 @@ async function call<T>(init?: RequestInit): Promise<T> {
 
   const error = body?.error;
   if (error === 'not-found' || error === 'busy' || error === 'no-store') throw new SignalError(error);
-  throw new SignalError(response.status === 503 ? 'no-store' : 'network');
+  throw new SignalError(response.status >= 500 ? 'unavailable' : 'network');
 }
 
 const post = <T>(body: object) =>

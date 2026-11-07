@@ -1,4 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import { execFile } from 'node:child_process';
+import { mkdtemp, readFile, rmdir, unlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
+import ts from 'typescript';
 import { memoryStore } from '../api/_memory-store';
 import { handle, ROOM_TTL_SECONDS, type Store } from '../api/rooms';
 
@@ -41,6 +48,8 @@ describe('rooms', () => {
     expect((await post({ action: 'send', to: `h:${privateRoom.body.code}`, data: 'offer' })).status).toBe(200);
     expect((await post({ action: 'create', host: 'Bad', mode: 'unknown' })).status).toBe(400);
     expect((await post({ action: 'create', host: 'Bad', mode: 'race' })).status).toBe(400);
+    expect((await post({ action: 'create', host: 'Bad', mode: '__proto__' })).status).toBe(400);
+    expect((await post({ action: 'create', host: 'Bad', mode: 'toString' })).status).toBe(400);
   });
 
   it('atomically gives simultaneous quick-play users one new host and the same room', async () => {
@@ -172,5 +181,31 @@ describe('bad requests', () => {
     const result = await api(null).post({ action: 'create', host: 'A', max: 8 });
     expect(result.status).toBe(503);
     expect(result.body.error).toBe('no-store');
+  });
+});
+
+describe('deployed Node function', () => {
+  it('loads and responds when its compiled entry point is deployed without other source files', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'zexosae-room-api-'));
+    const file = join(directory, 'rooms.mjs');
+    try {
+      const source = await readFile('api/rooms.ts', 'utf8');
+      const output = ts.transpileModule(source, {
+        compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
+      }).outputText;
+      await writeFile(file, output);
+      const script = `
+        const api = await import(process.argv[1]);
+        const response = await api.default.fetch(new Request('https://example.test/api/rooms'));
+        console.log(response.status, await response.text());
+      `;
+      const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script, pathToFileURL(file).href], {
+        env: { ...process.env, UPSTASH_REDIS_REST_URL: '', UPSTASH_REDIS_REST_TOKEN: '', KV_REST_API_URL: '', KV_REST_API_TOKEN: '' },
+      });
+      expect(stdout.trim()).toBe('503 {"error":"no-store"}');
+    } finally {
+      await unlink(file);
+      await rmdir(directory);
+    }
   });
 });
