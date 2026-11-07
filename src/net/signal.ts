@@ -1,6 +1,7 @@
 // Calls to the room API. Used only to find rooms and start a connection.
 
 import type { RoomSummary } from './protocol';
+import type { GameMode } from '../sim/game-modes';
 
 const API = '/api/rooms';
 
@@ -35,8 +36,11 @@ export async function listRooms(): Promise<RoomSummary[]> {
   return (await call<{ rooms: RoomSummary[] }>()).rooms;
 }
 
-export const createRoom = (host: string, max: number) =>
-  post<{ code: string; hostKey: string }>({ action: 'create', host, max });
+export const createRoom = (host: string, max: number, mode: GameMode, privateRoom: boolean) =>
+  post<{ code: string; hostKey: string }>({ action: 'create', host, max, mode, private: privateRoom });
+
+export const quickRoom = (host: string, mode: GameMode, avoid: string[]) =>
+  post<{ code: string; hosted: true; hostKey: string; mode: GameMode } | { code: string; hosted: false }>({ action: 'quick-create', host, mode, avoid });
 
 export const beat = (code: string, hostKey: string, players: number) =>
   post({ action: 'beat', code, hostKey, players });

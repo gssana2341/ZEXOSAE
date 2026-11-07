@@ -5,19 +5,21 @@
 import { viewForward } from '../sim/aim';
 import type { V3 } from '../sim/map';
 import { TUNING, type Dummy } from '../sim/player';
+import { GAME_MODES, isGameMode, type GameMode } from '../sim/game-modes';
 import { HostSession } from './host';
 import { makeOffer, type Link } from './link';
 import {
   cleanCode,
   PLAYER_HP,
   type ClientMessage,
+  type MatchState,
   type PlayerInfo,
   type PlayerSnapshot,
   type RoomSummary,
   type ServerMessage,
   type Vec,
 } from './protocol';
-import { createRoom, listRooms, poll, sendToHost, SignalError } from './signal';
+import { closeRoom, createRoom, listRooms, poll, quickRoom, sendToHost, SignalError } from './signal';
 
 const RENDER_DELAY_MS = 120;
 const MAX_SAMPLES = 12;
@@ -51,6 +53,7 @@ const wait = (ms: number) => new Promise((resolve) => window.setTimeout(resolve,
 export class NetClient {
   id = 0;
   code = '';
+  match: MatchState | null = null;
   readonly players = new Map<number, PlayerInfo>();
 
   private host: HostSession | null = null;
@@ -64,6 +67,8 @@ export class NetClient {
   private pingTimer = 0;
   private pingMs: number | null = null;
   private lastPongAt = 0;
+  private lastSnapshotSeq = -1;
+  private joining: { resolve: () => void; reject: (error: Error) => void } | null = null;
 
   constructor(
     private readonly onMessage: (m: ServerMessage) => void,
@@ -85,15 +90,72 @@ export class NetClient {
     return listRooms();
   }
 
-  async create(name: string, maxPlayers: number): Promise<void> {
+  async create(name: string, maxPlayers: number, mode: GameMode = 'deathmatch', privateRoom = false): Promise<void> {
     this.close();
     const attempt = this.attempt;
-    const { code, hostKey } = await createRoom(name, maxPlayers);
-    if (attempt !== this.attempt) return;
+    const { code, hostKey } = await createRoom(name, maxPlayers, mode, privateRoom);
+    if (attempt !== this.attempt) {
+      void closeRoom(code, hostKey).catch(() => undefined);
+      return;
+    }
 
-    this.host = new HostSession(code, hostKey, maxPlayers, name, {
+    this.host = new HostSession(code, hostKey, maxPlayers, name, mode, {
       send: (m) => this.receive(m),
     });
+  }
+
+  /** Join a random open public room, or host a random mode if none is available. */
+  async quickPlay(name: string): Promise<void> {
+    this.close();
+    let attempt = this.attempt;
+    const rooms = (await listRooms()).filter((room) => room.players < room.max);
+    if (attempt !== this.attempt) return;
+    // Shuffle without trusting the room board's ordering to be random.
+    for (let i = rooms.length - 1; i > 0; i -= 1) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [rooms[i], rooms[j]] = [rooms[j], rooms[i]];
+    }
+    const tried: string[] = [];
+    for (const room of rooms.slice(0, 3)) {
+      const joining = this.join(room.code, name);
+      attempt = this.attempt;
+      try {
+        await joining;
+        return;
+      } catch (error) {
+        if (attempt !== this.attempt) return;
+        if (!(error instanceof SignalError) || !['full', 'not-found', 'connect'].includes(error.reason)) throw error;
+        tried.push(room.code);
+      }
+    }
+    for (let i = 0; i < 3 && attempt === this.attempt; i += 1) {
+      const mode = GAME_MODES[Math.floor(Math.random() * GAME_MODES.length)];
+      const room = await quickRoom(name, mode, tried);
+      if (attempt !== this.attempt) {
+        if (room.hosted) void closeRoom(room.code, room.hostKey).catch(() => undefined);
+        return;
+      }
+      if (room.hosted) {
+        try {
+          this.host = new HostSession(room.code, room.hostKey, 8, name, room.mode, { send: (m) => this.receive(m) });
+        } catch (error) {
+          void closeRoom(room.code, room.hostKey).catch(() => undefined);
+          throw error;
+        }
+        return;
+      }
+      const joining = this.join(room.code, name);
+      attempt = this.attempt;
+      try {
+        await joining;
+        return;
+      } catch (error) {
+        if (attempt !== this.attempt) return;
+        if (!(error instanceof SignalError) || !['full', 'not-found', 'connect'].includes(error.reason)) throw error;
+        tried.push(room.code);
+      }
+    }
+    if (attempt === this.attempt) throw new SignalError('connect');
   }
 
   async join(rawCode: string, name: string): Promise<void> {
@@ -103,6 +165,10 @@ export class NetClient {
     const box = randomBox();
 
     const { link, sdp } = await makeOffer();
+    if (attempt !== this.attempt) {
+      link.close();
+      return;
+    }
     try {
       await sendToHost(code, JSON.stringify({ from: box, sdp }));
       const answer = await this.waitForAnswer(box, attempt);
@@ -121,10 +187,34 @@ export class NetClient {
     link.onMessage = (raw) => this.receive(JSON.parse(raw) as ServerMessage);
     link.onClosed = () => {
       this.link = null;
+      if (this.joining) {
+        const joining = this.joining;
+        this.joining = null;
+        joining.reject(new SignalError('connect'));
+        return;
+      }
       this.reset();
       this.onClosed();
     };
+    const joined = new Promise<void>((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        this.joining = null;
+        reject(new SignalError('connect'));
+      }, CONNECT_TIMEOUT_MS);
+      this.joining = {
+        resolve: () => { window.clearTimeout(timer); resolve(); },
+        reject: (error) => { window.clearTimeout(timer); reject(error); },
+      };
+    });
     this.send({ t: 'join', code, name });
+    try {
+      await joined;
+    } catch (error) {
+      link.close();
+      if (this.link === link) this.link = null;
+      throw error;
+    }
+    if (attempt !== this.attempt) return;
     this.pingTimer = window.setInterval(
       () => this.send({ t: 'ping', at: performance.now() }),
       PING_EVERY_MS,
@@ -144,6 +234,11 @@ export class NetClient {
   /** Leaves on purpose, so this doesn't call onClosed. */
   close(): void {
     this.attempt += 1;
+    if (this.joining) {
+      const joining = this.joining;
+      this.joining = null;
+      joining.reject(new SignalError('connect'));
+    }
     this.host?.stop();
     this.host = null;
     this.link?.close();
@@ -159,6 +254,8 @@ export class NetClient {
     this.dummies.clear();
     this.frozenUntil.clear();
     this.code = '';
+    this.match = null;
+    this.lastSnapshotSeq = -1;
   }
 
   send(message: ClientMessage): void {
@@ -178,6 +275,15 @@ export class NetClient {
         this.id = m.id;
         this.code = m.code;
         for (const p of m.players) this.players.set(p.id, p);
+        this.match = m.match && isGameMode(m.match.mode) ? m.match : null;
+        break;
+      case 'error':
+        if (this.joining) {
+          const joining = this.joining;
+          this.joining = null;
+          joining.reject(new SignalError(m.reason));
+          return;
+        }
         break;
       case 'playerJoin':
         this.players.set(m.player.id, m.player);
@@ -188,7 +294,16 @@ export class NetClient {
         this.dummies.delete(m.id);
         break;
       case 'snapshot': {
+        if (typeof m.seq === 'number') {
+          if (m.seq <= this.lastSnapshotSeq) return;
+          this.lastSnapshotSeq = m.seq;
+        }
         const at = performance.now();
+        if (m.match && isGameMode(m.match.mode)) this.match = m.match;
+        for (const s of m.scores ?? []) {
+          const player = this.players.get(s.id);
+          if (player) player.score = s.score;
+        }
         for (const s of m.players) {
           const list = this.samples.get(s.id) ?? [];
           list.push({ ...s, at });
@@ -197,6 +312,14 @@ export class NetClient {
         }
         return;
       }
+      case 'roundStart':
+        if (typeof m.seq === 'number') this.lastSnapshotSeq = Math.max(this.lastSnapshotSeq, m.seq);
+        if (m.match && isGameMode(m.match.mode)) this.match = m.match;
+        this.players.clear();
+        for (const player of m.players) this.players.set(player.id, player);
+        this.samples.clear();
+        this.frozenUntil.clear();
+        break;
       case 'damage': {
         const target = this.players.get(m.target);
         const shooter = this.players.get(m.by);
@@ -212,6 +335,11 @@ export class NetClient {
       case 'snared':
         this.frozenUntil.set(m.target, performance.now() + TUNING.snareTime * 1000);
         break;
+      case 'healed': {
+        const p = this.players.get(m.target);
+        if (p) p.hp = m.hp;
+        break;
+      }
       case 'respawn': {
         this.frozenUntil.delete(m.id);
         const p = this.players.get(m.id);
@@ -224,6 +352,11 @@ export class NetClient {
       }
     }
     this.onMessage(m);
+    if (m.t === 'joined' && this.joining) {
+      const joining = this.joining;
+      this.joining = null;
+      joining.resolve();
+    }
   }
 
   /** Other players, positioned for this frame, in the shape the simulation shoots at. */
@@ -238,6 +371,9 @@ export class NetClient {
         this.dummies.set(info.id, d);
       }
       d.name = info.name;
+      d.team = info.team;
+      const ownTeam = this.players.get(this.id)?.team;
+      d.ally = ownTeam !== undefined && ownTeam === info.team;
       d.hp = info.hp;
       d.snareT = Math.max(0, ((this.frozenUntil.get(info.id) ?? 0) - now) / 1000);
 
@@ -248,6 +384,8 @@ export class NetClient {
         d.pos = toV3(sample.pos);
         d.yaw = sample.yaw;
         d.aim = viewForward(sample.yaw, sample.pitch);
+        d.mode = sample.mode;
+        d.motion = sample.motion;
         d.anchor = sample.anchor ? toV3(sample.anchor) : null;
       }
       list.push(d);
@@ -274,6 +412,8 @@ export class NetClient {
           yaw: angleLerp(a.yaw, b.yaw, k),
           pitch: a.pitch + (b.pitch - a.pitch) * k,
           anchor: b.anchor,
+          mode: b.mode,
+          motion: b.motion,
         };
       }
     }

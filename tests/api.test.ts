@@ -30,7 +30,36 @@ describe('rooms', () => {
   it('lists rooms without revealing the host key', async () => {
     const { post, list } = api();
     const { body } = await post({ action: 'create', host: 'Host', max: 6 });
-    expect(await list()).toEqual([{ code: body.code, host: 'Host', players: 1, max: 6 }]);
+    expect(await list()).toEqual([{ code: body.code, host: 'Host', players: 1, max: 6, mode: 'deathmatch' }]);
+  });
+
+  it('lists the selected mode for public rooms and keeps private rooms off the board', async () => {
+    const { post, list } = api();
+    const publicRoom = await post({ action: 'create', host: 'Public', mode: 'control' });
+    const privateRoom = await post({ action: 'create', host: 'Friends', mode: 'crown', private: true });
+    expect(await list()).toEqual([{ code: publicRoom.body.code, host: 'Public', players: 1, max: 8, mode: 'control' }]);
+    expect((await post({ action: 'send', to: `h:${privateRoom.body.code}`, data: 'offer' })).status).toBe(200);
+    expect((await post({ action: 'create', host: 'Bad', mode: 'unknown' })).status).toBe(400);
+    expect((await post({ action: 'create', host: 'Bad', mode: 'race' })).status).toBe(400);
+  });
+
+  it('atomically gives simultaneous quick-play users one new host and the same room', async () => {
+    const { post, list } = api();
+    const results = await Promise.all(Array.from({ length: 8 }, (_, i) => post({ action: 'quick-create', host: `P${i}`, mode: 'crown' })));
+    expect(results.every((r) => r.status === 200)).toBe(true);
+    expect(results.filter((r) => r.body.hosted)).toHaveLength(1);
+    expect(new Set(results.map((r) => r.body.code)).size).toBe(1);
+    expect(results.filter((r) => !r.body.hosted).every((r) => !('hostKey' in r.body))).toBe(true);
+    expect(await list()).toHaveLength(1);
+  });
+
+  it('can avoid a full or unreachable quick-play room', async () => {
+    const { post } = api();
+    const first = await post({ action: 'quick-create', host: 'A', mode: 'teams' });
+    const other = await post({ action: 'quick-create', host: 'B', mode: 'control', avoid: [first.body.code] });
+    expect(first.body.hosted).toBe(true);
+    expect(other.body.hosted).toBe(true);
+    expect(other.body.code).not.toBe(first.body.code);
   });
 
   it('keeps room sizes between 2 and 16', async () => {

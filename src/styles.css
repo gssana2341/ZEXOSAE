@@ -59,6 +59,32 @@ select {
   filter: grayscale(1) brightness(0.72);
 }
 
+.loading {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: radial-gradient(circle at 50% 38%, #29334c, #10141f 70%);
+  text-align: center;
+}
+
+.loading-card h1 { margin: 0 0 25px; letter-spacing: 0.12em; }
+.loading-card p { color: var(--muted); }
+.loading-spinner {
+  width: 36px;
+  height: 36px;
+  margin: 0 auto 20px;
+  border: 3px solid rgba(255, 255, 255, 0.16);
+  border-top-color: var(--teal);
+  border-radius: 50%;
+  animation: loading-spin 0.9s linear infinite;
+}
+.loading button[hidden] { display: none; }
+@keyframes loading-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .loading-spinner { animation: none; } }
+
 /* HUD */
 
 .hud {
@@ -76,6 +102,7 @@ select {
   position: absolute;
   inset: 0;
   opacity: 0;
+  will-change: opacity;
   background: radial-gradient(ellipse at center, transparent 52%, rgba(255, 255, 255, 0.34) 100%);
 }
 
@@ -131,6 +158,19 @@ select {
   border: 4px solid var(--orange);
   border-radius: 50%;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
+}
+
+.ring-marker.crown-marker::before {
+  content: '👑';
+  left: -16px;
+  top: -20px;
+  width: auto;
+  height: auto;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  font-size: 26px;
+  filter: drop-shadow(0 1px 3px #000);
 }
 
 .course {
@@ -571,6 +611,7 @@ select {
 .danger {
   position: absolute;
   opacity: 0;
+  will-change: opacity;
 }
 
 .danger-top {
@@ -745,6 +786,7 @@ select {
 
 .empty,
 .device-note,
+.mode-help,
 .profile-line {
   margin: 0;
   font-size: 13px;
@@ -912,4 +954,186 @@ select {
 
 .ping[data-quality='bad'] {
   color: #ff7a70;
+}
+
+.view-button {
+  position: absolute;
+  top: calc(46px + var(--safe-t));
+  right: calc(144px + var(--safe-r));
+  min-width: 72px;
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: #fff;
+  font: inherit;
+  font-size: 14px;
+  background: rgba(14, 19, 30, 0.5);
+  pointer-events: auto;
+}
+
+/* Fighting HUD */
+
+.vitals {
+  position: absolute;
+  left: 50%;
+  top: calc(14px + var(--safe-t));
+  width: min(260px, 36vw);
+  transform: translateX(-50%);
+  display: grid;
+  gap: 5px;
+}
+
+.hp-bar {
+  position: relative;
+  height: 12px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: rgba(10, 14, 24, 0.6);
+}
+
+.hp-fill {
+  height: 100%;
+  width: 100%;
+  background: linear-gradient(90deg, #ff5a4a, #ffb347);
+}
+
+.hp-value {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  font-weight: 700;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+}
+
+.focus-bar {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+}
+
+.focus-pip {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--teal);
+  opacity: 0.15;
+}
+
+.focus-pip.full {
+  box-shadow: 0 0 8px var(--teal);
+}
+
+.perch::before {
+  content: '';
+  position: absolute;
+  left: -9px;
+  top: -9px;
+  width: 18px;
+  height: 18px;
+  border: 2px solid #ffd166;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
+}
+
+.perch::after {
+  content: '';
+  position: absolute;
+  left: -5px;
+  top: -20px;
+  border: 5px solid transparent;
+  border-bottom: 7px solid #ffd166;
+}
+
+.perch.hang::after {
+  top: 9px;
+  border-bottom: 5px solid transparent;
+  border-top: 7px solid #ffd166;
+}
+
+.target-hp {
+  position: absolute;
+  left: -24px;
+  top: 30px;
+  width: 48px;
+  max-width: 48px;
+  height: 4px;
+  border-radius: 2px;
+  background: #ff5a4a;
+}
+
+.callout {
+  position: absolute;
+  left: 50%;
+  top: 38%;
+  transform: translate(-50%, 0) scale(0.9);
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  color: #ffd166;
+  white-space: nowrap;
+  opacity: 0;
+  text-shadow: 0 2px 5px rgba(0, 0, 0, 0.8);
+}
+
+.callout.on {
+  animation: callout-pop 0.9s ease-out forwards;
+}
+
+.callout.strong {
+  font-size: 30px;
+  color: var(--orange);
+}
+
+@keyframes callout-pop {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, 6px) scale(0.8);
+  }
+  15% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1.08);
+  }
+  70% {
+    opacity: 1;
+    transform: translate(-50%, -4px) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -10px) scale(1);
+  }
+}
+
+.hurt-flash {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  will-change: opacity;
+  background: radial-gradient(ellipse at center, transparent 55%, rgba(255, 40, 30, 0.55) 100%);
+  transition: opacity 0.2s;
+}
+
+.hurt-flash.on {
+  opacity: 1;
+  transition: none;
+}
+
+.pad-web {
+  right: calc(214px + var(--safe-r));
+  bottom: calc(40px + var(--safe-b));
+}
+
+.pad-focus {
+  right: calc(186px + var(--safe-r));
+  bottom: calc(156px + var(--safe-b));
+}
+
+.touch.swapped .pad-web {
+  right: auto;
+  left: calc(214px + var(--safe-l));
+}
+
+.touch.swapped .pad-focus {
+  right: auto;
+  left: calc(186px + var(--safe-l));
 }

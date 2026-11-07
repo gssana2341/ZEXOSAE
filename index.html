@@ -9,7 +9,15 @@
   </head>
   <body>
     <canvas id="game"></canvas>
-    <div id="ui"></div>
+    <div id="ui" inert></div>
+    <div id="loading" class="loading" role="status" aria-live="polite">
+      <div class="loading-card">
+        <h1>ZEXOSAE</h1>
+        <div class="loading-spinner" aria-hidden="true"></div>
+        <p id="loading-message">กำลังเตรียมเมืองและตัวละคร…</p>
+        <button id="loading-retry" type="button" hidden>ลองอีกครั้ง</button>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

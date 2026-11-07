@@ -1,7 +1,9 @@
 // The only server code in the game. It lists open rooms and passes connection
 // offers between browsers. Game traffic never comes here: players connect to the
 // host's browser directly. Vercel doesn't keep memory between requests, so this
-// state lives in Redis. This file has no local imports, to deploy as one function.
+// state lives in Redis.
+
+import { isGameMode, type GameMode } from '../src/sim/game-modes';
 
 export interface RoomRecord {
   code: string;
@@ -9,6 +11,8 @@ export interface RoomRecord {
   players: number;
   max: number;
   hostKey: string;
+  mode: GameMode;
+  private: boolean;
 }
 
 export interface Store {
@@ -30,6 +34,9 @@ const MAX_LISTED_ROOMS = 40;
 const MAX_BODY_CHARS = 16000;
 
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+// Shared, atomically claimed slots prevent simultaneous quick-play requests from
+// each creating an empty room. They remain ordinary rooms after creation.
+const QUICK_CODES = Array.from({ length: 64 }, (_, i) => `QA${CODE_ALPHABET[Math.floor(i / CODE_ALPHABET.length)]}${CODE_ALPHABET[i % CODE_ALPHABET.length]}`);
 const CODE_PATTERN = /^[A-Z2-9]{4}$/;
 const HOST_BOX = /^h:[A-Z2-9]{4}$/;
 const PEER_BOX = /^p:[a-f0-9]{32}$/;
@@ -71,9 +78,10 @@ export async function handle(request: Request, store: Store | null): Promise<Res
     const open = (r: RoomRecord) => (r.players < r.max ? 1 : 0);
     return json({
       rooms: rooms
+        .filter((r) => !r.private && (!r.mode || isGameMode(r.mode)))
         .sort((a, b) => open(b) - open(a) || b.players - a.players)
         .slice(0, MAX_LISTED_ROOMS)
-        .map(({ code, host, players, max }) => ({ code, host, players, max })),
+        .map(({ code, host, players, max, mode }) => ({ code, host, players, max, mode: isGameMode(mode) ? mode : 'deathmatch' })),
     });
   }
   if (request.method !== 'POST') return fail('method', 405);
@@ -92,9 +100,31 @@ export async function handle(request: Request, store: Store | null): Promise<Res
     case 'create': {
       const hostKey = crypto.randomUUID();
       const max = clampSize(m.max, 2, 16, 8);
+      if (m.mode !== undefined && !isGameMode(m.mode)) return fail('bad-request', 400);
+      const mode = isGameMode(m.mode) ? m.mode : 'deathmatch';
       for (let tries = 0; tries < 8; tries += 1) {
-        const room = { code: newCode(), host: cleanName(m.host), players: 1, max, hostKey };
+        const room = { code: newCode(), host: cleanName(m.host), players: 1, max, hostKey, mode, private: m.private === true };
         if (await store.claimRoom(room)) return json({ code: room.code, hostKey });
+      }
+      return fail('busy', 503);
+    }
+
+    case 'quick-create': {
+      if (!isGameMode(m.mode)) return fail('bad-request', 400);
+      const avoid = Array.isArray(m.avoid) ? m.avoid.filter((code): code is string => typeof code === 'string' && CODE_PATTERN.test(code)).slice(0, 10) : [];
+      for (const code of QUICK_CODES) {
+        if (avoid.includes(code)) continue;
+        const existing = await store.getRoom(code);
+        if (existing) {
+          if (!existing.private && (!existing.mode || isGameMode(existing.mode)) && existing.players < existing.max) return json({ code, hosted: false });
+          continue;
+        }
+        const hostKey = crypto.randomUUID();
+        const room: RoomRecord = { code, host: cleanName(m.host), players: 1, max: 8, hostKey, mode: m.mode, private: false };
+        if (await store.claimRoom(room)) return json({ code, hostKey, mode: room.mode, hosted: true });
+        // Another request won the same slot between our read and claim.
+        const winner = await store.getRoom(code);
+        if (winner && !winner.private && (!winner.mode || isGameMode(winner.mode)) && winner.players < winner.max) return json({ code, hosted: false });
       }
       return fail('busy', 503);
     }

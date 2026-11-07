@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { ARENA_FLOOR, ARENA_LIMIT } from '../src/sim/map';
+import { createTestArena } from './test-map';
 import { TICK, World } from '../src/sim/world';
-import { emptyInput, horizontalSpeed, snarePlayer, totalSpeed, TUNING, type TickInput, type WebAssist } from '../src/sim/player';
+import { HITS, MAX_HP } from '../src/sim/hits';
+import { climbWallNormal, emptyInput, horizontalSpeed, snarePlayer, totalSpeed, TUNING, type TickInput, type WebAssist } from '../src/sim/player';
+
+const testWorld = () => new World(null, createTestArena());
 
 function run(world: World, seconds: number, input: Partial<TickInput> | ((t: number) => Partial<TickInput>)) {
   const ticks = Math.round(seconds / TICK);
@@ -13,7 +17,7 @@ function run(world: World, seconds: number, input: Partial<TickInput> | ((t: num
 
 /** Puts the player on open ground in the plaza. */
 function onPlaza(yaw = 0): World {
-  const w = new World();
+  const w = testWorld();
   w.player.pos = { x: 0, y: 0.5, z: 8 };
   w.player.yaw = yaw;
   run(w, 0.3, {});
@@ -22,7 +26,7 @@ function onPlaza(yaw = 0): World {
 
 describe('ground movement', () => {
   it('lands on the spawn roof without falling through', () => {
-    const w = new World();
+    const w = testWorld();
     run(w, 1, {});
     expect(w.player.mode).toBe('ground');
     expect(w.player.pos.y).toBeCloseTo(24, 1);
@@ -57,17 +61,17 @@ describe('ground movement', () => {
   });
 
   it('auto-vaults a low ledge', () => {
-    const w = new World();
+    const w = testWorld();
     w.player.pos = { x: 14, y: 0.05, z: 42 };
     w.player.yaw = 0;
-    run(w, 1.2, { moveZ: 1 });
+    run(w, 1.6, { moveZ: 1 });
     expect(w.player.pos.z).toBeLessThan(36);
   });
 });
 
 describe('walls', () => {
   it('never lets a fast player pass through a thin panel', () => {
-    const w = new World();
+    const w = testWorld();
     w.player.pos = { x: 20, y: 6, z: 0 };
     w.player.vel = { x: TUNING.maxSpeed, y: 0, z: 0 };
     w.player.mode = 'air';
@@ -76,7 +80,7 @@ describe('walls', () => {
   });
 
   it('wall-runs along a panel, then wall-jumps off it', () => {
-    const w = new World();
+    const w = testWorld();
     w.player.pos = { x: 28.9, y: 7, z: 10 };
     w.player.vel = { x: 3, y: 2, z: -13 };
     w.player.mode = 'air';
@@ -85,7 +89,7 @@ describe('walls', () => {
     const zBefore = w.player.pos.z;
     const yBefore = w.player.pos.y;
     run(w, 0.3, {});
-    expect(w.player.pos.z).toBeLessThan(zBefore - 3);
+    expect(w.player.pos.z).toBeLessThan(zBefore - 2.5);
     expect(w.player.pos.y).toBeGreaterThan(yBefore - 1);
 
     run(w, 0.1, (t) => ({ jump: t === 0 }));
@@ -94,22 +98,234 @@ describe('walls', () => {
     expect(w.player.vel.y).toBeGreaterThan(5);
   });
 
-  it('wall-run ends on its own', () => {
-    const w = new World();
+  it('holds a wall run at speed while pushing along it', () => {
+    const w = testWorld();
+    w.player.pos = { x: 28.9, y: 7, z: 10 };
+    w.player.vel = { x: 3, y: 2, z: -13 };
+    w.player.mode = 'air';
+    run(w, 0.2, { moveZ: 1 });
+    expect(w.player.mode).toBe('wall');
+    const speed = -w.player.vel.z;
+    run(w, 0.3, { moveZ: 1 });
+    expect(-w.player.vel.z).toBeGreaterThan(speed - 0.5);
+  });
+
+  it('a wall run slows and slips away instead of holding on', () => {
+    const w = testWorld();
     w.player.pos = { x: 28.9, y: 9, z: 12 };
     w.player.vel = { x: 3, y: 2, z: -7 };
     w.player.mode = 'air';
     run(w, 0.15, {});
     expect(w.player.mode).toBe('wall');
-    run(w, TUNING.wallMaxTime + 1.5, {});
+    run(w, 6, {});
     expect(w.player.mode).not.toBe('wall');
+  });
+});
+
+describe('climbing', () => {
+  // The north face of the apartment block, seen from the plaza side.
+  const FACE_Z = 37;
+  const FACING = Math.PI;
+
+  function atWall(y = 6, input: Partial<TickInput> = { moveZ: 1, yaw: FACING }): World {
+    const w = new World();
+    w.player.pos = { x: 0, y, z: FACE_Z - TUNING.radius - 0.3 };
+    w.player.yaw = FACING;
+    w.player.vel = { x: 0, y: 0, z: 2 };
+    w.player.mode = 'air';
+    run(w, 0.2, input);
+    return w;
+  }
+
+  it('catches any building wall when pressing toward it', () => {
+    expect(atWall().player.mode).toBe('wall');
+  });
+
+  it('climbs up a wall at its own pace', () => {
+    const w = atWall();
+    const y = w.player.pos.y;
+    run(w, 1, { moveZ: 1, yaw: FACING });
+    expect(w.player.pos.y).toBeGreaterThan(y + 4);
+    expect(w.player.vel.y).toBeLessThanOrEqual(TUNING.wallClimbSpeed + 6);
+  });
+
+  it('goes where the player looks along the wall', () => {
+    const w = atWall();
+    const x = w.player.pos.x;
+    run(w, 0.8, { moveZ: 1, yaw: FACING + Math.PI / 2 - 0.3 });
+    expect(Math.abs(w.player.pos.x - x)).toBeGreaterThan(3);
+    expect(w.player.mode).toBe('wall');
+  });
+
+  it('strafes along the wall', () => {
+    const w = atWall();
+    const x = w.player.pos.x;
+    run(w, 0.6, { moveX: 1, yaw: FACING });
+    expect(Math.abs(w.player.pos.x - x)).toBeGreaterThan(2);
+  });
+
+  it('climbs down when looking down', () => {
+    const w = atWall(12);
+    run(w, 0.3, { moveZ: 1, yaw: FACING });
+    const y = w.player.pos.y;
+    run(w, 1, { moveZ: 1, yaw: FACING, pitch: -1.2 });
+    expect(w.player.pos.y).toBeLessThan(y - 3);
+  });
+
+  it('never holds a player still: doing nothing slips them down', () => {
+    const w = atWall(14);
+    run(w, 0.5, {});
+    const y = w.player.pos.y;
+    run(w, 1, {});
+    expect(w.player.pos.y).toBeLessThan(y - 1.5);
+    expect(w.player.vel.y).toBeGreaterThanOrEqual(-TUNING.wallSlipSpeed - 0.5);
+  });
+
+  it('turns a fast head-on hit into a rise up the wall', () => {
+    const slow = atWall();
+    const w = new World();
+    w.player.pos = { x: 0, y: 6, z: FACE_Z - 6 };
+    w.player.yaw = FACING;
+    w.player.vel = { x: 0, y: 0, z: 20 };
+    w.player.mode = 'air';
+    run(w, 0.4, { moveZ: 1, yaw: FACING });
+    expect(w.player.mode).toBe('wall');
+    expect(w.player.vel.y).toBeGreaterThan(slow.player.vel.y + 4);
+  });
+
+  function slamInto(mode: 'air' | 'swing' | 'dash'): World {
+    const w = new World();
+    w.player.pos = { x: 0, y: 6, z: FACE_Z - 4 };
+    w.player.yaw = FACING;
+    w.player.vel = { x: 0, y: 0, z: TUNING.wallSlamSpeed + 6 };
+    w.player.mode = mode;
+    if (mode === 'swing') {
+      w.player.anchor = { x: 0, y: 30, z: FACE_Z - 4 };
+      w.player.ropeLen = 24;
+    }
+    if (mode === 'dash') w.player.dashT = 1;
+    return w;
+  }
+
+  it('bounces off a wall hit too hard to hold, dazed', () => {
+    const w = slamInto('air');
+    const slams: number[] = [];
+    for (let i = 0; i < 20; i += 1) {
+      w.step({ ...emptyInput(), moveZ: 1, yaw: FACING }, TICK);
+      for (const e of w.events) if (e.type === 'slam') slams.push(e.speed);
+      w.events.length = 0;
+    }
+    expect(slams).toHaveLength(1);
+    expect(w.player.mode).toBe('air');
+    expect(w.player.vel.z).toBeLessThan(0);
+    expect(w.player.stunT).toBeGreaterThan(0);
+  });
+
+  it('loses the web when swinging into a wall too hard', () => {
+    const w = slamInto('swing');
+    run(w, 0.3, { moveZ: 1, yaw: FACING, swing: true });
+    expect(w.player.anchor).toBeNull();
+    expect(w.player.stunT).toBeGreaterThan(0);
+  });
+
+  it('cannot grab, web or dash while dazed, then recovers', () => {
+    const w = slamInto('air');
+    run(w, 0.3, { moveZ: 1, yaw: FACING });
+    run(w, 0.1, { moveZ: 1, yaw: FACING, swing: true, dash: true, pitch: 0.6, webAssist: 'wide' });
+    expect(w.player.mode).toBe('air');
+    expect(w.player.anchor).toBeNull();
+    run(w, TUNING.wallSlamStun, {});
+    expect(w.player.stunT).toBe(0);
+  });
+
+  it('falls straight past a wall when not pressing toward it', () => {
+    const w = new World();
+    w.player.pos = { x: 0, y: 20, z: FACE_Z - TUNING.radius - 0.05 };
+    w.player.vel = { x: 0, y: -4, z: 0 };
+    w.player.mode = 'air';
+    run(w, 0.4, {});
+    expect(w.player.mode).toBe('air');
+  });
+
+  it('cannot catch a wall when falling too fast', () => {
+    const w = new World();
+    w.player.pos = { x: 0, y: 23, z: FACE_Z - TUNING.radius - 0.05 };
+    w.player.yaw = FACING;
+    w.player.vel = { x: 0, y: -TUNING.wallGripFall - 4, z: 0 };
+    w.player.mode = 'air';
+    run(w, 0.1, { moveZ: 1, yaw: FACING });
+    expect(w.player.mode).toBe('air');
+  });
+
+  it('lets go when pushing away', () => {
+    const w = atWall();
+    run(w, 0.1, { moveZ: -1, yaw: FACING });
+    expect(w.player.mode).toBe('air');
+    expect(w.player.vel.z).toBeLessThan(-2);
+  });
+
+  it('hops over the top onto the roof', () => {
+    const w = atWall(18);
+    run(w, 2.5, { moveZ: 1, yaw: FACING });
+    expect(w.player.pos.y).toBeGreaterThan(23.9);
+    expect(w.player.pos.z).toBeGreaterThan(FACE_Z);
+    expect(w.player.mode).toBe('ground');
+  });
+
+  it('starts from the ground by looking up and walking in', () => {
+    const w = new World();
+    w.player.pos = { x: 0, y: 0.05, z: FACE_Z - 2 };
+    w.player.yaw = FACING;
+    run(w, 1, { moveZ: 1, yaw: FACING, pitch: 0.7 });
+    expect(w.player.mode).toBe('wall');
+    expect(w.player.pos.y).toBeGreaterThan(1);
+  });
+
+  it('stays on the ground when walking into a wall without looking up', () => {
+    const w = new World();
+    w.player.pos = { x: 0, y: 0.05, z: FACE_Z - 2 };
+    w.player.yaw = FACING;
+    run(w, 1, { moveZ: 1, yaw: FACING });
+    expect(w.player.mode).toBe('ground');
+  });
+
+  it('leaps up the wall when jumping and looking up', () => {
+    const flat = atWall();
+    run(flat, 0.05, (t) => ({ jump: t === 0, yaw: FACING }));
+    const up = atWall();
+    run(up, 0.05, (t) => ({ jump: t === 0, yaw: FACING, pitch: 1.2 }));
+    expect(up.player.vel.y).toBeGreaterThan(flat.player.vel.y + 2);
+    expect(Math.abs(up.player.vel.z)).toBeLessThan(Math.abs(flat.player.vel.z));
+  });
+
+  it('can shoot a web straight off a wall', () => {
+    const w = atWall();
+    run(w, 0.1, { swing: true, yaw: 0, pitch: 0.6, webAssist: 'wide' });
+    expect(w.player.mode).toBe('swing');
+  });
+
+  it('finds the wall another player is holding', () => {
+    const w = atWall();
+    expect(climbWallNormal(w.map, w.player.pos)?.z).toBe(-1);
+    expect(climbWallNormal(w.map, { x: 0, y: 6, z: 20 })).toBeNull();
+  });
+
+  it('cannot climb the invisible edge of the arena', () => {
+    const w = new World();
+    w.player.pos = { x: 0, y: 75, z: -20 };
+    w.map.boxes.length = 0;
+    w.map.boxes.push({ min: { x: -5, y: 0, z: -22 }, max: { x: 5, y: 90, z: -20.4 }, kind: 'bound' });
+    w.player.vel = { x: 0, y: 0, z: -3 };
+    w.player.mode = 'air';
+    run(w, 0.2, { moveZ: 1 });
+    expect(w.player.mode).toBe('air');
   });
 });
 
 describe('web pull', () => {
   /** In the plaza at height, looking up at the crossing beam. */
   function underBeam(pitch = 0.9): World {
-    const w = new World();
+    const w = testWorld();
     w.player.pos = { x: 0, y: 14, z: 22 };
     w.player.yaw = 0;
     w.player.pitch = pitch;
@@ -127,7 +343,7 @@ describe('web pull', () => {
   });
 
   it('finds nothing when aiming at open sky without assist', () => {
-    const w = new World();
+    const w = testWorld();
     w.player.pos = { x: 20, y: 14, z: 10 };
     w.player.yaw = Math.PI;
     w.player.pitch = 1.4;
@@ -174,7 +390,7 @@ describe('web pull', () => {
   });
 
   it('stretches under a hard fall instead of stopping dead, and stays within its limit', () => {
-    const w = new World();
+    const w = testWorld();
     w.player.pos = { x: 0, y: 30, z: 6 };
     w.player.pitch = 1.45;
     w.player.mode = 'air';
@@ -197,7 +413,7 @@ describe('web pull', () => {
 
   /** Web point found from a spot, with the given help. */
   function anchorFrom(x: number, y: number, z: number, yaw: number, pitch: number, webAssist: WebAssist) {
-    const w = new World();
+    const w = testWorld();
     w.player.pos = { x, y, z };
     w.player.mode = 'air';
     run(w, TICK, { yaw, pitch, webAssist });
@@ -224,7 +440,7 @@ describe('web pull', () => {
   });
 
   it('a jump, then a pull from the roof builds real speed', () => {
-    const w = new World();
+    const w = testWorld();
     run(w, 0.2, {});
     run(w, 0.7, (t) => ({ moveZ: 1, jump: t > 0.55 && t < 0.57 }));
     let top = 0;
@@ -238,7 +454,7 @@ describe('web pull', () => {
 
 describe('mouse flight', () => {
   it('bends the flight path toward the camera and keeps the speed', () => {
-    const w = new World();
+    const w = testWorld();
     w.player.pos = { x: 0, y: 30, z: 20 };
     w.player.vel = { x: 0, y: 0, z: -18 };
     w.player.mode = 'air';
@@ -248,7 +464,7 @@ describe('mouse flight', () => {
   });
 
   it('falls from the spawn roof in about a second', () => {
-    const w = new World();
+    const w = testWorld();
     w.player.pos = { x: 0, y: 24, z: 22 };
     w.player.mode = 'air';
     let time = 0;
@@ -276,7 +492,7 @@ describe('mouse flight', () => {
   });
 
   it('a long fall does not take away forward speed', () => {
-    const w = new World();
+    const w = testWorld();
     w.player.pos = { x: -40, y: 70, z: 20 };
     w.player.vel = { x: 30, y: -10, z: 0 };
     w.player.mode = 'air';
@@ -286,7 +502,7 @@ describe('mouse flight', () => {
   });
 
   it('loses speed slowly in the air, down to run speed at the lowest', () => {
-    const w = new World();
+    const w = testWorld();
     w.player.pos = { x: 0, y: 80, z: 40 };
     w.player.vel = { x: 0, y: 30, z: -14 };
     w.player.mode = 'air';
@@ -297,7 +513,7 @@ describe('mouse flight', () => {
 
   it('turns less sharply at high speed', () => {
     const turnedAt = (speed: number) => {
-      const w = new World();
+      const w = testWorld();
       w.player.pos = { x: 0, y: 44, z: 40 };
       w.player.vel = { x: 0, y: 8, z: -speed };
       w.player.mode = 'air';
@@ -308,7 +524,7 @@ describe('mouse flight', () => {
   });
 
   it('does not turn while forward is not held, so you can look back and shoot', () => {
-    const w = new World();
+    const w = testWorld();
     w.player.pos = { x: 0, y: 30, z: 20 };
     w.player.vel = { x: 0, y: 0, z: -18 };
     w.player.mode = 'air';
@@ -318,7 +534,7 @@ describe('mouse flight', () => {
   });
 
   it('wall-jumps toward the camera', () => {
-    const w = new World();
+    const w = testWorld();
     w.player.pos = { x: 28.9, y: 7, z: 10 };
     w.player.vel = { x: 3, y: 2, z: -13 };
     w.player.mode = 'air';
@@ -333,7 +549,7 @@ describe('mouse flight', () => {
 describe('web shot', () => {
   /** Stands still in front of dummy 0, which is frozen so the aim is exact. */
   function facingDummy(power = 0): World {
-    const w = new World();
+    const w = testWorld();
     const d = w.dummies[0];
     w.map.patrols[0] = { a: { ...d.pos }, b: { ...d.pos } };
     w.player.pos = { x: d.pos.x, y: 0.05, z: d.pos.z + 14 };
@@ -352,13 +568,19 @@ describe('web shot', () => {
     expect(Math.abs(w.player.pos.z - z)).toBeLessThan(0.01);
   });
 
-  it('one hit is a KO, standing still or moving', () => {
+  it('a shot takes a quarter of the HP, standing still or moving', () => {
     for (const speed of [0, 8, 30]) {
       const w = facingDummy(speed);
       run(w, 0.3, shootOnce);
-      expect(w.kos).toBe(1);
-      expect(w.dummies[0].respawnT).toBeGreaterThan(0);
+      expect(w.dummies[0].hp).toBe(MAX_HP - HITS.shot.damage);
     }
+  });
+
+  it('four shots are a KO', () => {
+    const w = facingDummy();
+    run(w, 1.4, (t) => ({ shoot: Math.round(t / TICK) % 18 === 0, aimAssist: false }));
+    expect(w.kos).toBe(1);
+    expect(w.dummies[0].respawnT).toBeGreaterThan(0);
   });
 
   it('a hit refunds the dash', () => {
@@ -372,30 +594,38 @@ describe('web shot', () => {
     const w = facingDummy();
     w.player.yaw = 0.2;
     run(w, 0.4, shootOnce);
-    expect(w.dummies[0].hp).toBe(1);
+    expect(w.dummies[0].hp).toBe(MAX_HP);
   });
 
   it('bends onto a target it would just miss when aim help is on', () => {
     const near = facingDummy();
-    near.player.yaw = 0.075;
+    near.player.yaw = 0.12;
     run(near, 0.4, (t) => ({ shoot: t === 0, aimAssist: false }));
-    expect(near.dummies[0].hp).toBe(1);
+    expect(near.dummies[0].hp).toBe(MAX_HP);
 
     const helped = facingDummy();
-    helped.player.yaw = 0.075;
+    helped.player.yaw = 0.12;
     run(helped, 0.4, (t) => ({ shoot: t === 0, aimAssist: true }));
-    expect(helped.dummies[0].respawnT).toBeGreaterThan(0);
+    expect(helped.dummies[0].hp).toBeLessThan(MAX_HP);
+  });
+
+  it('reaches a moving target far away almost at once', () => {
+    const w = facingDummy();
+    const flight = 60 / TUNING.shotSpeed;
+    expect(flight).toBeLessThan(0.25);
+    run(w, TICK, (t) => ({ shoot: t === 0, aimAssist: false }));
+    expect(w.shots.length + w.kos).toBeGreaterThan(0);
   });
 
   it('still misses a clearly bad shot with aim help on', () => {
     const w = facingDummy();
-    w.player.yaw = 0.15;
+    w.player.yaw = 0.3;
     run(w, 0.4, (t) => ({ shoot: t === 0, aimAssist: true }));
-    expect(w.dummies[0].hp).toBe(1);
+    expect(w.dummies[0].hp).toBe(MAX_HP);
   });
 
   it('is stopped by a wall', () => {
-    const w = new World();
+    const w = testWorld();
     const d = w.dummies[0];
     d.pos = { x: 0, y: 3.5, z: 26 };
     w.map.patrols[0] = { a: d.pos, b: d.pos };
@@ -403,7 +633,7 @@ describe('web shot', () => {
     w.player.yaw = 0;
     w.player.pitch = 0;
     run(w, 0.4, shootOnce);
-    expect(w.dummies[0].hp).toBe(1);
+    expect(w.dummies[0].hp).toBe(MAX_HP);
     expect(w.shots.length).toBe(0);
   });
 
@@ -415,7 +645,7 @@ describe('web shot', () => {
   });
 
   it('snare stops a dummy dead, then lets it go', () => {
-    const w = new World();
+    const w = testWorld();
     const d = w.dummies[1];
     w.player.pos = { x: 0, y: 0.05, z: 0 };
     d.snareT = TUNING.snareTime;
@@ -430,13 +660,103 @@ describe('web shot', () => {
     const w = facingDummy();
     run(w, 0.2, (t) => ({ snare: t === 0, aimAssist: false }));
     expect(w.dummies[0].snareT).toBeGreaterThan(0);
-    expect(w.dummies[0].hp).toBe(1);
+    expect(w.dummies[0].hp).toBe(MAX_HP);
+  });
+});
+
+describe('jump pads', () => {
+  function onPad(index = 0) {
+    const w = testWorld();
+    const pad = w.map.jumpPads[index];
+    w.player.pos = { x: pad.x, y: 0.05, z: pad.z };
+    return w;
+  }
+
+  it('there are two, away from spawn points and walls', () => {
+    const { jumpPads, spawns, boxes } = testWorld().map;
+    expect(jumpPads).toHaveLength(2);
+    for (const pad of jumpPads) {
+      for (const { pos } of spawns) {
+        expect(Math.hypot(pos.x - pad.x, pos.y - pad.y, pos.z - pad.z)).toBeGreaterThan(5);
+      }
+      // Nothing overhead for the whole flight.
+      const blocked = boxes.some(
+        (b) =>
+          b.max.y > 0.5 &&
+          b.min.y < 40 &&
+          pad.x + 3 > b.min.x &&
+          pad.x - 3 < b.max.x &&
+          pad.z + 3 > b.min.z &&
+          pad.z - 3 < b.max.z,
+      );
+      expect(blocked).toBe(false);
+    }
+  });
+
+  it.each([0, 1])('pad %i throws the player above the edge roofs', (index) => {
+    const w = onPad(index);
+    let top = 0;
+    run(w, 1.5, () => {
+      top = Math.max(top, w.player.pos.y);
+      return {};
+    });
+    expect(top).toBeGreaterThan(28);
+    expect(w.events.some((e) => e.type === 'jumpPad' && e.index === index)).toBe(true);
+  });
+
+  it('keeps forward speed, so a run carries over the pad', () => {
+    const w = onPad();
+    w.player.vel = { x: 15, y: 0, z: 0 };
+    w.player.mode = 'ground';
+    run(w, 0.1, { yaw: -Math.PI / 2, moveZ: 1 });
+    expect(w.player.vel.x).toBeGreaterThan(10);
+    expect(w.player.vel.y).toBeGreaterThan(30);
+  });
+
+  it('sets off when landing on it from above', () => {
+    const w = onPad();
+    w.player.pos.y = 8;
+    w.player.mode = 'air';
+    run(w, 1, {});
+    expect(w.events.some((e) => e.type === 'jumpPad')).toBe(true);
+  });
+
+  it('does nothing beside the pad', () => {
+    const w = testWorld();
+    const pad = w.map.jumpPads[0];
+    w.player.pos = { x: pad.x + 4, y: 0.05, z: pad.z };
+    run(w, 0.3, {});
+    expect(w.events.some((e) => e.type === 'jumpPad')).toBe(false);
+    expect(w.player.mode).toBe('ground');
+  });
+
+  it('is not set off from a web passing low overhead', () => {
+    const w = onPad();
+    w.player.mode = 'swing';
+    w.player.anchor = { x: 0, y: 40, z: 0 };
+    w.player.ropeLen = 40;
+    run(w, 0.05, { swing: true, aimAssist: false });
+    expect(w.events.some((e) => e.type === 'jumpPad')).toBe(false);
+  });
+
+  it('does not launch a frozen player', () => {
+    const w = onPad();
+    snarePlayer(w.player);
+    run(w, 0.3, {});
+    expect(w.events.some((e) => e.type === 'jumpPad')).toBe(false);
+  });
+
+  it('launches online too, with no server involved', () => {
+    const w = onPad();
+    w.setOnline(true);
+    run(w, 0.2, {});
+    expect(w.player.pos.y).toBeGreaterThan(5);
   });
 });
 
 describe('frozen by a snare', () => {
   function frozen(pos = { x: 0, y: 0.05, z: 8 }) {
-    const w = new World();
+    const w = testWorld();
     w.player.pos = { ...pos };
     run(w, 0.1, {});
     snarePlayer(w.player);
@@ -460,7 +780,7 @@ describe('frozen by a snare', () => {
   });
 
   it('hangs in mid-air instead of falling', () => {
-    const w = new World();
+    const w = testWorld();
     w.player.pos = { x: 0, y: 30, z: 8 };
     w.player.vel = { x: 10, y: -20, z: 0 };
     w.player.mode = 'air';
@@ -486,7 +806,7 @@ describe('frozen by a snare', () => {
   });
 
   it('drops the web when frozen', () => {
-    const w = new World();
+    const w = testWorld();
     w.player.pos = { x: 0, y: 14, z: 22 };
     w.player.mode = 'air';
     run(w, 0.05, { swing: true, pitch: 0.9, aimAssist: false });
@@ -501,13 +821,13 @@ describe('leaving the arena', () => {
     Math.abs(w.player.pos.x) > ARENA_LIMIT || Math.abs(w.player.pos.z) > ARENA_LIMIT || w.player.pos.y < ARENA_FLOOR;
 
   it.each([
-    ['over the east wall', { x: 90.5, y: 100, z: 0 }],
-    ['over the west wall', { x: -90.5, y: 100, z: 0 }],
-    ['over the north wall', { x: 0, y: 100, z: -90.5 }],
-    ['over the south wall', { x: 0, y: 100, z: 90.5 }],
+    ['over the east wall', { x: ARENA_LIMIT + 0.5, y: 120, z: 0 }],
+    ['over the west wall', { x: -ARENA_LIMIT - 0.5, y: 120, z: 0 }],
+    ['over the north wall', { x: 0, y: 120, z: -ARENA_LIMIT - 0.5 }],
+    ['over the south wall', { x: 0, y: 120, z: ARENA_LIMIT + 0.5 }],
     ['through the floor', { x: 0, y: -9, z: 0 }],
   ])('comes back from %s', (_name, pos) => {
-    const w = new World();
+    const w = testWorld();
     w.player.pos = pos;
     w.player.mode = 'air';
     run(w, TICK, {});
@@ -516,10 +836,10 @@ describe('leaving the arena', () => {
   });
 
   it('practice goes back to the start and restarts the lap', () => {
-    const w = new World();
+    const w = testWorld();
     w.ringIndex = 3;
     w.lapRunning = true;
-    w.player.pos = { x: 95, y: 100, z: 0 };
+    w.player.pos = { x: ARENA_LIMIT + 5, y: 120, z: 0 };
     run(w, TICK, {});
     expect(w.player.pos.z).toBeCloseTo(w.map.spawn.z, 1);
     expect(w.ringIndex).toBe(0);
@@ -528,11 +848,11 @@ describe('leaving the arena', () => {
 
   it('online returns to a spawn point away from other players', () => {
     for (let i = 0; i < 40; i += 1) {
-      const w = new World();
+      const w = testWorld();
       w.setOnline(true);
       const near = w.map.spawns[0].pos;
       w.dummies = [{ id: 7, pos: { ...near }, hp: 1, snareT: 0, respawnT: 0, phase: 0, dir: 1 }];
-      w.respawnAt({ x: 95, y: 100, z: 0 }, 0);
+      w.respawnAt({ x: ARENA_LIMIT + 5, y: 120, z: 0 }, 0);
       w.step(emptyInput(), TICK);
       const p = w.player.pos;
       expect(w.map.spawns.some((s) => s.pos.x === p.x && s.pos.z === p.z)).toBe(true);
@@ -541,7 +861,7 @@ describe('leaving the arena', () => {
   });
 
   it('does not touch a player inside the arena, even on top of a tower', () => {
-    const w = new World();
+    const w = testWorld();
     w.player.pos = { x: 48, y: 62.05, z: 48 };
     run(w, 0.5, {});
     expect(w.player.pos.x).toBe(48);
@@ -555,7 +875,7 @@ describe('leaving the arena', () => {
         state = (state * 1664525 + 1013904223) >>> 0;
         return state / 2 ** 32;
       };
-      const w = new World();
+      const w = testWorld();
       w.setOnline(true);
       const spawn = w.map.spawns[seed % w.map.spawns.length];
       w.respawnAt(spawn.pos, spawn.yaw);
@@ -584,7 +904,7 @@ describe('leaving the arena', () => {
 describe('course', () => {
 
   it('times a lap through every ring in order', () => {
-    const w = new World();
+    const w = testWorld();
     for (const ring of w.map.rings) {
       w.player.pos = { x: ring.x, y: ring.y - 1, z: ring.z };
       w.player.vel = { x: 0, y: 0, z: 0 };
@@ -598,7 +918,7 @@ describe('course', () => {
   });
 
   it('ignores rings taken out of order', () => {
-    const w = new World();
+    const w = testWorld();
     const ring = w.map.rings[3];
     w.player.pos = { x: ring.x, y: ring.y - 1, z: ring.z };
     run(w, 0.05, {});
@@ -606,7 +926,7 @@ describe('course', () => {
   });
 
   it('no ring sits inside solid geometry', () => {
-    const w = new World();
+    const w = testWorld();
     for (const r of w.map.rings) {
       const inside = w.map.boxes.some(
         (b) =>

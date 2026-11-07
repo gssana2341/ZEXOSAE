@@ -1,14 +1,39 @@
 // Messages shared by the game and the server. No DOM and no Node APIs in here.
 
+import { ACTS, HIT_KINDS, MAX_HP, type HitKind } from '../sim/hits';
+import type { Mode } from '../sim/player';
+import type { GameMode, Team } from '../sim/game-modes';
+
 export const MAX_ROOM_SIZE = 16;
 export const DEFAULT_ROOM_SIZE = 8;
 export const ROOM_SIZES = [2, 4, 6, 8, 10, 12, 14, 16];
-/** Each hit takes 1. Raise this if players should survive a hit. */
-export const PLAYER_HP = 1;
+/** Each hit takes what its kind deals, from sim/hits.ts. */
+export const PLAYER_HP = MAX_HP;
 export const RESPAWN_MS = 3000;
 export const SPAWN_PROTECT_MS = 1500;
 export const SNAPSHOT_HZ = 20;
 export const STATE_HZ = 20;
+
+const MOTION_MODES: readonly Mode[] = [
+  'ground',
+  'air',
+  'wall',
+  'swing',
+  'dash',
+  'zip',
+  'hang',
+  'strike',
+  'pound',
+];
+const POSE_MODES = [
+  ...MOTION_MODES,
+  'slide',
+  'stun',
+  ...ACTS,
+] as const;
+export type PoseMode = (typeof POSE_MODES)[number];
+const isPoseMode = (v: unknown): v is PoseMode => POSE_MODES.includes(v as PoseMode);
+const isMotionMode = (v: unknown): v is Mode => MOTION_MODES.includes(v as Mode);
 
 export const CODE_LENGTH = 4;
 
@@ -21,6 +46,19 @@ export interface PlayerInfo {
   deaths: number;
   hp: number;
   alive: boolean;
+  team?: Team;
+  score?: number;
+}
+
+export interface MatchState {
+  mode: GameMode;
+  phase: 'waiting' | 'playing' | 'finished';
+  remaining: number;
+  teamScores: Record<Team, number>;
+  holder: number | null;
+  /** Crown position in the world, whether loose or above its holder. */
+  crown: Vec | null;
+  result: string;
 }
 
 export interface PlayerSnapshot {
@@ -29,6 +67,8 @@ export interface PlayerSnapshot {
   yaw: number;
   pitch: number;
   anchor: Vec | null;
+  mode?: PoseMode;
+  motion?: Mode;
 }
 
 export interface RoomSummary {
@@ -36,31 +76,37 @@ export interface RoomSummary {
   host: string;
   players: number;
   max: number;
+  mode: GameMode;
 }
 
 export type ClientMessage =
   | { t: 'join'; code: string; name: string }
-  | { t: 'state'; pos: Vec; yaw: number; pitch: number; anchor: Vec | null }
-  | { t: 'shot'; origin: Vec; dir: Vec; snare: boolean }
-  | { t: 'hit'; target: number; snare: boolean }
+  | { t: 'state'; pos: Vec; yaw: number; pitch: number; anchor: Vec | null; mode?: PoseMode; motion?: Mode; safe?: boolean }
+  | { t: 'shot'; origin: Vec; dir: Vec; snare: boolean; crate?: boolean }
+  | { t: 'hit'; target: number; snare: boolean; kind?: HitKind; knock?: Vec; stun?: number; pin?: boolean; power?: number }
+  | { t: 'heal' }
   | { t: 'ping'; at: number };
 
 
 export type ServerMessage =
-  | { t: 'joined'; code: string; id: number; players: PlayerInfo[]; pos: Vec; yaw: number }
+  | { t: 'joined'; code: string; id: number; players: PlayerInfo[]; pos: Vec; yaw: number; match: MatchState }
   | { t: 'error'; reason: 'full' }
   | { t: 'pong'; at: number }
   | { t: 'playerJoin'; player: PlayerInfo }
   | { t: 'playerLeave'; id: number }
-  | { t: 'snapshot'; players: PlayerSnapshot[] }
-  | { t: 'shot'; id: number; origin: Vec; dir: Vec; snare: boolean }
+  | { t: 'snapshot'; seq: number; players: PlayerSnapshot[]; match: MatchState; scores: Array<{ id: number; score: number }> }
+  | { t: 'roundStart'; seq: number; match: MatchState; players: PlayerInfo[]; spawns: Array<{ id: number; pos: Vec; yaw: number }> }
+  | { t: 'shot'; id: number; origin: Vec; dir: Vec; snare: boolean; crate?: boolean }
   | { t: 'damage'; target: number; by: number; hp: number; ko: boolean; kills: number; deaths: number }
   | { t: 'snared'; target: number; by: number }
+  | { t: 'knock'; target: number; by: number; vel: Vec; stun: number; pin: boolean }
+  | { t: 'healed'; target: number; hp: number }
   | { t: 'respawn'; id: number; pos: Vec; yaw: number };
 
 const isNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 const isVec = (v: unknown): v is Vec => Array.isArray(v) && v.length === 3 && v.every(isNumber);
 const isText = (v: unknown, max: number): v is string => typeof v === 'string' && v.length <= max;
+const isHitKind = (v: unknown): v is HitKind => HIT_KINDS.includes(v as HitKind);
 
 /** Anything from the network is untrusted, so each message is checked field by field. */
 export function parseClientMessage(raw: string): ClientMessage | null {
@@ -79,16 +125,36 @@ export function parseClientMessage(raw: string): ClientMessage | null {
         : null;
     case 'state':
       return isVec(m.pos) && isNumber(m.yaw) && isNumber(m.pitch) && (m.anchor === null || isVec(m.anchor))
-        ? { t: 'state', pos: m.pos, yaw: m.yaw, pitch: m.pitch, anchor: m.anchor }
+        ? {
+            t: 'state',
+            pos: m.pos,
+            yaw: m.yaw,
+            pitch: m.pitch,
+            anchor: m.anchor,
+            mode: isPoseMode(m.mode) ? m.mode : undefined,
+            motion: isMotionMode(m.motion) ? m.motion : undefined,
+            safe: m.safe === true,
+          }
         : null;
     case 'shot':
       return isVec(m.origin) && isVec(m.dir) && typeof m.snare === 'boolean'
-        ? { t: 'shot', origin: m.origin, dir: m.dir, snare: m.snare }
+        ? { t: 'shot', origin: m.origin, dir: m.dir, snare: m.snare, crate: m.crate === true }
         : null;
     case 'hit':
       return isNumber(m.target) && typeof m.snare === 'boolean'
-        ? { t: 'hit', target: m.target, snare: m.snare }
+        ? {
+            t: 'hit',
+            target: m.target,
+            snare: m.snare,
+            kind: isHitKind(m.kind) ? m.kind : undefined,
+            knock: isVec(m.knock) ? m.knock : undefined,
+            stun: isNumber(m.stun) ? m.stun : undefined,
+            pin: m.pin === true,
+            power: isNumber(m.power) ? m.power : undefined,
+          }
         : null;
+    case 'heal':
+      return { t: 'heal' };
     case 'ping':
       return isNumber(m.at) ? { t: 'ping', at: m.at } : null;
     default:

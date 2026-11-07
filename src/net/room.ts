@@ -9,44 +9,62 @@ import {
   SPAWN_PROTECT_MS,
   type ClientMessage,
   type PlayerInfo,
+  type MatchState,
+  type PoseMode,
   type ServerMessage,
   type Vec,
 } from './protocol';
-import { createArena } from '../sim/map';
-import { TUNING } from '../sim/player';
+import { HITS, hitDamage, MAX_KNOCK, MAX_STUN, type HitKind } from '../sim/hits';
+import { ARENA_FLOOR, ARENA_LIMIT, createArena, raycast } from '../sim/map';
+import { MOVES } from '../sim/moves';
+import type { Mode } from '../sim/player';
+import { CONTROL_POINT, CROWN_CARRY_HEIGHT, CROWN_PICKUP_RADIUS, CROWN_SPAWN, MIN_MATCH_PLAYERS, MODE_INFO, ROUND_BREAK_MS, type GameMode, type Team } from '../sim/game-modes';
 
 /** Allows for lag between what the shooter saw and the last position the server has. */
 const HIT_RANGE_MARGIN = 25;
 /** Cooldowns are checked with some slack, so a late packet isn't treated as cheating. */
 const COOLDOWN_SLACK = 0.7;
+/** A dodge reported in the last state covers the player for this long, to bridge updates. */
+const SAFE_MS = 200;
+/** The fastest a player can heal again. */
+const HEAL_EVERY_MS = MOVES.healCooldown * 1000;
 /** A spawn this far from everyone alive counts as safe. */
 const SAFE_SPAWN_DISTANCE = 30;
 /** With no safe spawn, the pick comes from this many of the farthest ones. */
 const FALLBACK_SPAWNS = 3;
+/** Objective modes keep players close enough to contest the central point. */
+const OBJECTIVE_SPAWN_RADIUS = 170;
 
-const SPAWNS = createArena().spawns;
+const MAP = createArena();
+const SPAWNS = MAP.spawns;
 
 export interface Client {
   send(message: ServerMessage): void;
 }
 
 interface RoomPlayer extends PlayerInfo {
+  score: number;
   client: Client;
   pos: Vec;
   yaw: number;
   pitch: number;
   anchor: Vec | null;
+  mode?: PoseMode;
+  motion?: Mode;
   /** The last spawn used, so a player doesn't appear in the same place twice in a row. */
   spawn: (typeof SPAWNS)[number];
   respawnAt: number;
   protectedUntil: number;
-  lastHitAt: number;
-  lastSnareAt: number;
+  /** Mid-dodge, hits pass through. */
+  safeUntil: number;
+  /** When this player last landed each kind of hit. */
+  lastAt: Partial<Record<HitKind, number>>;
+  lastHealAt: number;
 }
 
 function info(p: RoomPlayer): PlayerInfo {
-  const { id, name, kills, deaths, hp, alive } = p;
-  return { id, name, kills, deaths, hp, alive };
+  const { id, name, kills, deaths, hp, alive, team, score } = p;
+  return { id, name, kills, deaths, hp, alive, team, score: Math.floor(score) };
 }
 
 const distance = (a: Vec, b: Vec) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
@@ -55,13 +73,39 @@ const toVec = (spawn: (typeof SPAWNS)[number]): Vec => [spawn.pos.x, spawn.pos.y
 export class Room {
   private readonly players = new Map<number, RoomPlayer>();
   private nextId = 1;
+  private snapshotSeq = 0;
+  private phase: MatchState['phase'] = 'waiting';
+  private roundEnd = 0;
+  private breakEnd = 0;
+  private lastTick = 0;
+  private holder: number | null = null;
+  private looseCrown: Vec | null = null;
+  private result = '';
+  private teamScores: Record<Team, number> = { red: 0, blue: 0 };
 
   constructor(
     readonly code: string,
     private readonly now: () => number,
     readonly maxPlayers: number = DEFAULT_ROOM_SIZE,
     private readonly random: () => number = Math.random,
+    readonly gameMode: GameMode = 'deathmatch',
   ) {}
+
+  private match(now = this.now()): MatchState {
+    const remaining = this.phase === 'playing' ? Math.max(0, Math.ceil((this.roundEnd - now) / 1000)) : 0;
+    const carrier = this.holder === null ? null : this.players.get(this.holder);
+    const crown: Vec | null = this.gameMode !== 'crown' || this.phase === 'waiting'
+      ? null
+      : carrier ? [carrier.pos[0], carrier.pos[1] + CROWN_CARRY_HEIGHT, carrier.pos[2]] : this.looseCrown;
+    return { mode: this.gameMode, phase: this.phase, remaining, teamScores: { ...this.teamScores }, holder: this.holder, crown, result: this.result };
+  }
+
+  private nextTeam(): Team | undefined {
+    if (this.gameMode !== 'teams') return undefined;
+    const red = [...this.players.values()].filter((p) => p.team === 'red').length;
+    const blue = this.players.size - red;
+    return red <= blue ? 'red' : 'blue';
+  }
 
   get size(): number {
     return this.players.size;
@@ -76,6 +120,8 @@ export class Room {
       name: cleanName(rawName),
       kills: 0,
       deaths: 0,
+      score: 0,
+      team: this.nextTeam(),
       hp: PLAYER_HP,
       alive: true,
       client,
@@ -86,8 +132,9 @@ export class Room {
       spawn,
       respawnAt: 0,
       protectedUntil: this.now() + SPAWN_PROTECT_MS,
-      lastHitAt: 0,
-      lastSnareAt: 0,
+      safeUntil: 0,
+      lastAt: {},
+      lastHealAt: 0,
     };
     this.nextId += 1;
 
@@ -100,17 +147,31 @@ export class Room {
       players: [...this.players.values()].map(info),
       pos: player.pos,
       yaw: spawn.yaw,
+      match: this.match(),
     });
+    if (this.phase === 'waiting' && this.players.size >= MIN_MATCH_PLAYERS) this.startRound();
     return player.id;
   }
 
   remove(id: number): void {
-    if (this.players.delete(id)) this.broadcast({ t: 'playerLeave', id });
+    if (this.gameMode === 'crown' && this.phase === 'playing' && this.now() >= this.roundEnd) this.finishRound();
+    const leaving = this.players.get(id);
+    if (leaving && this.gameMode === 'crown' && this.holder === id && this.phase === 'playing') this.dropCrown(leaving);
+    if (!this.players.delete(id)) return;
+    this.broadcast({ t: 'playerLeave', id });
+    if (this.players.size < MIN_MATCH_PLAYERS) {
+      this.phase = 'waiting';
+      this.holder = null;
+      this.looseCrown = null;
+      this.result = '';
+    }
   }
 
   handle(id: number, m: ClientMessage): void {
     const player = this.players.get(id);
     if (!player) return;
+    // The holder at the deadline wins, even if the next tick has not run yet.
+    if (this.gameMode === 'crown' && this.phase === 'playing' && this.now() >= this.roundEnd) this.finishRound();
 
     switch (m.t) {
       case 'ping':
@@ -122,43 +183,59 @@ export class Room {
           player.yaw = m.yaw;
           player.pitch = m.pitch;
           player.anchor = m.anchor;
+          player.mode = m.mode;
+          player.motion = m.motion;
+          if (m.safe) player.safeUntil = this.now() + SAFE_MS;
+          if (this.gameMode === 'crown') this.collectCrown(player);
         }
         break;
+      case 'heal':
+        this.handleHeal(player);
+        break;
       case 'shot':
-        if (player.alive) this.broadcast({ ...m, id }, id);
+        if (player.alive && this.phase !== 'finished') this.broadcast({ ...m, id }, id);
         break;
       case 'hit':
-        this.handleHit(player, m.target, m.snare);
+        this.handleHit(player, m);
         break;
     }
   }
 
-  /** The shooter's game reports the hit, so what they saw is what counts. The server rejects impossible ones. */
-  private handleHit(shooter: RoomPlayer, targetId: number, snare: boolean): void {
-    const target = this.players.get(targetId);
+  /**
+   * The attacker's game reports the hit, so what they saw is what counts. The server
+   * rejects impossible ones: too far, too soon after the last of its kind, or on
+   * someone mid-dodge. Damage comes from the kind, never from the report.
+   */
+  private handleHit(shooter: RoomPlayer, m: Extract<ClientMessage, { t: 'hit' }>): void {
+    const target = this.players.get(m.target);
     const now = this.now();
     if (!target || target === shooter || !shooter.alive || !target.alive) return;
-    if (now < target.protectedUntil) return;
-    if (distance(shooter.pos, target.pos) > TUNING.shotRange + HIT_RANGE_MARGIN) return;
+    if (this.phase === 'finished') return;
+    if (this.gameMode === 'teams' && shooter.team === target.team) return;
+    if (now < target.protectedUntil || now < target.safeUntil) return;
 
-    if (snare) {
-      if (now - shooter.lastSnareAt < TUNING.snareCooldown * 1000 * COOLDOWN_SLACK) return;
-      shooter.lastSnareAt = now;
+    const kind: HitKind = m.kind ?? (m.snare ? 'snare' : 'shot');
+    const spec = HITS[kind];
+    if (distance(shooter.pos, target.pos) > spec.range + HIT_RANGE_MARGIN) return;
+    if (now - (shooter.lastAt[kind] ?? -Infinity) < spec.cooldown * 1000 * COOLDOWN_SLACK) return;
+    shooter.lastAt[kind] = now;
+
+    if (kind === 'snare') {
       this.broadcast({ t: 'snared', target: target.id, by: shooter.id });
       return;
     }
 
-    if (now - shooter.lastHitAt < TUNING.shotCooldown * 1000 * COOLDOWN_SLACK) return;
-    shooter.lastHitAt = now;
-
-    target.hp = Math.max(0, target.hp - 1);
+    target.hp = Math.max(0, target.hp - hitDamage(kind, m.power));
     const ko = target.hp === 0;
     if (ko) {
       target.alive = false;
+      if (this.gameMode === 'crown' && this.holder === target.id) this.dropCrown(target);
       target.anchor = null;
       target.deaths += 1;
       target.respawnAt = now + RESPAWN_MS;
       shooter.kills += 1;
+      if (this.gameMode === 'deathmatch' || this.gameMode === 'teams') shooter.score += 1;
+      if (this.gameMode === 'teams' && shooter.team) this.teamScores[shooter.team] += 1;
     }
     this.broadcast({
       t: 'damage',
@@ -169,11 +246,52 @@ export class Room {
       kills: shooter.kills,
       deaths: target.deaths,
     });
+
+    if (ko && this.phase === 'playing') {
+      const score = this.gameMode === 'teams' && shooter.team ? this.teamScores[shooter.team] : shooter.score;
+      if ((this.gameMode === 'teams' || this.gameMode === 'deathmatch') && score >= MODE_INFO[this.gameMode].goal) this.finishRound();
+    }
+
+    if (!ko && m.knock) {
+      // Only the one hit is moved, by their own game.
+      const size = Math.hypot(...m.knock);
+      const k = size > MAX_KNOCK ? MAX_KNOCK / size : 1;
+      target.client.send({
+        t: 'knock',
+        target: target.id,
+        by: shooter.id,
+        vel: [m.knock[0] * k, m.knock[1] * k, m.knock[2] * k],
+        stun: Math.min(MAX_STUN, Math.max(0, m.stun ?? 0)),
+        pin: m.pin === true,
+      });
+    }
+  }
+
+  /** Focus is spent on the player's side. The host only limits how often it can heal. */
+  private handleHeal(player: RoomPlayer): void {
+    const now = this.now();
+    if (!player.alive || now - player.lastHealAt < HEAL_EVERY_MS) return;
+    player.lastHealAt = now;
+    player.hp = Math.min(PLAYER_HP, player.hp + MOVES.healAmount);
+    this.broadcast({ t: 'healed', target: player.id, hp: player.hp });
   }
 
   tick(): void {
     const now = this.now();
+    if (this.phase === 'playing') {
+      const elapsed = Math.max(0, Math.min(1000, now - this.lastTick)) / 1000;
+      if (this.gameMode === 'crown' && now >= this.roundEnd) this.finishRound();
+      if (this.gameMode === 'control') this.stepControl(elapsed);
+      if (this.phase === 'playing' && this.gameMode === 'crown' && this.holder === null) {
+        for (const player of this.players.values()) this.collectCrown(player);
+      }
+      if (this.phase === 'playing' && now >= this.roundEnd) this.finishRound();
+    } else if (this.phase === 'finished' && now >= this.breakEnd && this.players.size >= MIN_MATCH_PLAYERS) {
+      this.startRound();
+    }
+    this.lastTick = now;
     for (const p of this.players.values()) {
+      if (this.phase === 'finished') break;
       if (p.alive || now < p.respawnAt) continue;
       const spawn = this.pickSpawn(p.spawn);
       p.alive = true;
@@ -188,10 +306,99 @@ export class Room {
 
     this.broadcast({
       t: 'snapshot',
+      seq: ++this.snapshotSeq,
       players: [...this.players.values()]
         .filter((p) => p.alive)
-        .map((p) => ({ id: p.id, pos: p.pos, yaw: p.yaw, pitch: p.pitch, anchor: p.anchor })),
+        .map((p) => ({ id: p.id, pos: p.pos, yaw: p.yaw, pitch: p.pitch, anchor: p.anchor, mode: p.mode, motion: p.motion })),
+      match: this.match(now),
+      scores: [...this.players.values()].map((p) => ({ id: p.id, score: Math.floor(p.score) })),
     });
+  }
+
+  private startRound(): void {
+    const now = this.now();
+    this.phase = 'playing';
+    this.roundEnd = now + MODE_INFO[this.gameMode].seconds * 1000;
+    this.lastTick = now;
+    this.teamScores = { red: 0, blue: 0 };
+    this.holder = null;
+    this.looseCrown = this.gameMode === 'crown' ? [CROWN_SPAWN.x, CROWN_SPAWN.y, CROWN_SPAWN.z] : null;
+    this.result = '';
+    const spawns: Array<{ id: number; pos: Vec; yaw: number }> = [];
+    for (const p of this.players.values()) {
+      const spawn = this.pickSpawn(p.spawn);
+      p.pos = toVec(spawn);
+      p.yaw = spawn.yaw;
+      p.pitch = 0;
+      p.spawn = spawn;
+      p.hp = PLAYER_HP;
+      p.alive = true;
+      p.kills = 0;
+      p.deaths = 0;
+      p.score = 0;
+      p.anchor = null;
+      p.protectedUntil = now + SPAWN_PROTECT_MS;
+      p.safeUntil = 0;
+      p.respawnAt = 0;
+      p.lastAt = {};
+      p.lastHealAt = 0;
+      spawns.push({ id: p.id, pos: p.pos, yaw: p.yaw });
+    }
+    this.broadcast({ t: 'roundStart', seq: this.snapshotSeq, match: this.match(now), players: [...this.players.values()].map(info), spawns });
+  }
+
+  private collectCrown(player: RoomPlayer): void {
+    const crown = this.looseCrown;
+    if (this.phase !== 'playing' || !player.alive || this.holder !== null || !crown) return;
+    const chest: Vec = [player.pos[0], player.pos[1] + 1, player.pos[2]];
+    const dist = distance(chest, crown);
+    if (dist > CROWN_PICKUP_RADIUS) return;
+    if (dist > 0.01 && raycast(MAP, { x: chest[0], y: chest[1], z: chest[2] }, { x: (crown[0] - chest[0]) / dist, y: (crown[1] - chest[1]) / dist, z: (crown[2] - chest[2]) / dist }, dist)) return;
+    this.holder = player.id;
+    this.looseCrown = null;
+  }
+
+  private dropCrown(player: RoomPlayer): void {
+    this.holder = null;
+    const [x, y, z] = player.pos;
+    if (Math.abs(x) >= ARENA_LIMIT || Math.abs(z) >= ARENA_LIMIT || y < ARENA_FLOOR) {
+      this.looseCrown = [CROWN_SPAWN.x, CROWN_SPAWN.y, CROWN_SPAWN.z];
+      return;
+    }
+    const from = { x, y: Math.max(0.1, y + 1), z };
+    const ground = raycast(MAP, from, { x: 0, y: -1, z: 0 }, from.y + 10);
+    this.looseCrown = ground ? [x, ground.point.y + 1, z] : [CROWN_SPAWN.x, CROWN_SPAWN.y, CROWN_SPAWN.z];
+  }
+
+  private stepControl(dt: number): void {
+    const zone = CONTROL_POINT;
+    const inside = [...this.players.values()].filter((p) => p.alive && p.pos[1] >= zone.y - 0.5 && p.pos[1] <= zone.y + zone.height && Math.hypot(p.pos[0] - zone.x, p.pos[2] - zone.z) <= zone.radius);
+    const owner = inside.length === 1 ? inside[0] : null;
+    this.holder = owner?.id ?? null;
+    if (!owner) return;
+    owner.score += dt;
+    if (owner.score >= MODE_INFO.control.goal) this.finishRound();
+  }
+
+  private finishRound(): void {
+    if (this.phase !== 'playing') return;
+    this.phase = 'finished';
+    this.breakEnd = this.now() + ROUND_BREAK_MS;
+    if (this.gameMode === 'crown') {
+      const winner = this.holder === null ? null : this.players.get(this.holder);
+      this.result = winner?.alive ? `${winner.name} ชนะ!` : 'ไม่มีผู้ชนะ เพราะไม่มีคนถือมงกุฎ';
+      return;
+    }
+    this.holder = null;
+    if (this.gameMode === 'teams') {
+      const { red, blue } = this.teamScores;
+      this.result = red === blue ? 'เสมอกัน!' : `${red > blue ? 'ทีมแดง' : 'ทีมน้ำเงิน'} ชนะ!`;
+      return;
+    }
+    const ranked = [...this.players.values()].sort((a, b) => b.score - a.score);
+    this.result = !ranked.length || (ranked.length > 1 && Math.abs(ranked[0].score - ranked[1].score) < 0.001)
+      ? 'เสมอกัน!'
+      : `${ranked[0].name} ชนะ!`;
   }
 
   /** A random spawn away from everyone alive, and not the one just used. */
@@ -200,7 +407,10 @@ export class Room {
     const gap = (spawn: (typeof SPAWNS)[number]) =>
       Math.min(Infinity, ...alive.map((p) => distance(toVec(spawn), p.pos)));
 
-    const options = SPAWNS.filter((spawn) => spawn !== last);
+    const poolForMode = this.gameMode === 'crown' || this.gameMode === 'control'
+      ? SPAWNS.filter(({ pos }) => Math.hypot(pos.x, pos.z) <= OBJECTIVE_SPAWN_RADIUS)
+      : SPAWNS;
+    const options = poolForMode.filter((spawn) => spawn !== last);
     const safe = options.filter((spawn) => gap(spawn) >= SAFE_SPAWN_DISTANCE);
     const pool = safe.length
       ? safe

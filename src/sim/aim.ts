@@ -8,7 +8,7 @@ import type { Dummy } from './player';
 export const AIM = {
   range: 90,
   /** A shot this close to a target bends onto it. A shot already hits within TUNING.shotRadius. */
-  magnetRadius: 1.2,
+  magnetRadius: 2.2,
   /** Keeps the help inside about 9 degrees, so a close target doesn't catch wild shots. */
   maxAngleTan: 0.16,
 } as const;

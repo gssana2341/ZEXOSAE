@@ -4,6 +4,7 @@
 import { makeAnswer, type Link } from './link';
 import { parseClientMessage, SNAPSHOT_HZ, type ClientMessage, type ServerMessage } from './protocol';
 import { Room, type Client } from './room';
+import type { GameMode } from '../sim/game-modes';
 import { beat, closeRoom, closeRoomNow, poll, sendToPeer } from './signal';
 
 const POLL_MS = 2500;
@@ -23,9 +24,10 @@ export class HostSession {
     private readonly hostKey: string,
     maxPlayers: number,
     name: string,
+    mode: GameMode,
     local: Client,
   ) {
-    this.room = new Room(code, Date.now, maxPlayers);
+    this.room = new Room(code, Date.now, maxPlayers, Math.random, mode);
     this.hostId = this.room.add(local, name)!;
 
     this.timers = [

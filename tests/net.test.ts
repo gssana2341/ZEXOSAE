@@ -11,7 +11,9 @@ import {
 } from '../src/net/protocol';
 import { createArena } from '../src/sim/map';
 import { TUNING } from '../src/sim/player';
+import { HITS, MAX_KNOCK, MAX_STUN } from '../src/sim/hits';
 import { TICK, World } from '../src/sim/world';
+import { createTestArena } from './test-map';
 import { emptyInput, snarePlayer } from '../src/sim/player';
 
 class FakeClient implements Client {
@@ -39,7 +41,14 @@ function roomWithTwo() {
     room.handle(by, m);
     return m;
   };
-  return { room, a, b, idA, idB, hit, advance: (ms: number) => (time += ms) };
+  /** Four web shots take a full 100 HP. */
+  const ko = (by = idA, target = idB) => {
+    for (let i = 0; i < 4; i += 1) {
+      hit(false, by, target);
+      time += 400;
+    }
+  };
+  return { room, a, b, idA, idB, hit, ko, advance: (ms: number) => (time += ms) };
 }
 
 describe('room size', () => {
@@ -84,12 +93,13 @@ describe('room rules', () => {
   });
 
   it('never respawns a player in the same place twice in a row', () => {
-    const { room, b, idA, hit, advance } = roomWithTwo();
-    let previous = b.last('joined')!.pos.join();
-    for (let i = 0; i < 30; i += 1) {
+    const { room, b, idA, ko, advance } = roomWithTwo();
+    let previous = b.last('roundStart')!.spawns.find((s) => s.id === b.last('joined')!.id)!.pos.join();
+    // Stay within one round, whose kill limit is 15.
+    for (let i = 0; i < 12; i += 1) {
       advance(SPAWN_PROTECT_MS + 1);
       room.handle(idA, { t: 'state', pos: [0, 0, 0], yaw: 0, pitch: 0, anchor: null });
-      hit();
+      ko();
       advance(RESPAWN_MS + 1);
       room.tick();
       const now = b.last('respawn')!.pos.join();
@@ -123,21 +133,25 @@ describe('room rules', () => {
     }
   });
 
-  it('one hit is a KO', () => {
-    const { a, idA, idB, hit } = roomWithTwo();
+  it('a web shot takes a quarter of the HP, and four are a KO', () => {
+    const { a, idA, idB, hit, ko, advance } = roomWithTwo();
     hit();
+    expect(a.last('damage')).toMatchObject({ target: idB, by: idA, hp: 75, ko: false });
+    advance(400);
+    ko();
     expect(a.last('damage')).toMatchObject({ target: idB, by: idA, hp: 0, ko: true, kills: 1, deaths: 1 });
   });
 
   it('respawns a KO player with full HP after the delay', () => {
-    const { room, b, idB, hit, advance } = roomWithTwo();
-    hit();
+    const { room, b, idB, ko, advance } = roomWithTwo();
+    ko();
     room.tick();
     expect(b.last('respawn')).toBeUndefined();
     advance(RESPAWN_MS + 1);
     room.tick();
     expect(b.last('respawn')?.id).toBe(idB);
-    expect(b.inbox.filter((m) => m.t === 'damage')).toHaveLength(1);
+    expect(b.inbox.filter((m) => m.t === 'damage')).toHaveLength(4);
+    expect(b.last('damage')?.ko).toBe(true);
   });
 
   it('protects a player right after spawning', () => {
@@ -156,7 +170,7 @@ describe('room rules', () => {
   });
 
   it('ignores impossible hits', () => {
-    const { room, a, idA, idB, hit } = roomWithTwo();
+    const { room, a, idA, idB, hit, ko } = roomWithTwo();
     hit(false, idA, idA); // self
     hit(false, idA, 999); // nobody
     room.handle(idA, { t: 'state', pos: [0, 0, 500], yaw: 0, pitch: 0, anchor: null }); // out of range
@@ -164,10 +178,10 @@ describe('room rules', () => {
     expect(a.last('damage')).toBeUndefined();
 
     room.handle(idA, { t: 'state', pos: [0, 0, 0], yaw: 0, pitch: 0, anchor: null });
-    hit();
+    ko();
     hit(); // already KO
     room.handle(idB, { t: 'hit', target: idA, snare: false }); // KO players can't shoot
-    expect(a.inbox.filter((m) => m.t === 'damage')).toHaveLength(1);
+    expect(a.inbox.filter((m) => m.t === 'damage')).toHaveLength(4);
   });
 
   it('ignores shots faster than the fire rate', () => {
@@ -190,6 +204,31 @@ describe('room rules', () => {
     advance(TUNING.snareCooldown * 1000);
     hit(true);
     expect(a.inbox.filter((m) => m.t === 'snared')).toHaveLength(2);
+  });
+});
+
+describe('pose over the network', () => {
+  it('passes each player\'s move on, so others see the right animation', () => {
+    const { room, b, idA } = roomWithTwo();
+    room.handle(idA, { t: 'state', pos: [0, 0, 0], yaw: 0, pitch: 0, anchor: null, mode: 'slide' });
+    room.tick();
+    expect(b.last('snapshot')?.players.find((p) => p.id === idA)?.mode).toBe('slide');
+  });
+
+  it('sends physical motion separately from the action being animated', () => {
+    const m = parseClientMessage('{"t":"state","pos":[1,2,3],"yaw":0,"pitch":0,"anchor":[0,20,0],"mode":"cast","motion":"swing"}');
+    expect(m).toMatchObject({ t: 'state', mode: 'cast', motion: 'swing' });
+    const { room, b, idA } = roomWithTwo();
+    room.handle(idA, m as Extract<ClientMessage, { t: 'state' }>);
+    room.tick();
+    expect(b.last('snapshot')?.players.find((p) => p.id === idA)).toMatchObject({ mode: 'cast', motion: 'swing' });
+    const bad = parseClientMessage('{"t":"state","pos":[1,2,3],"yaw":0,"pitch":0,"anchor":null,"motion":"cast"}');
+    expect(bad).toMatchObject({ t: 'state', motion: undefined });
+  });
+
+  it('ignores a pose it does not know', () => {
+    const m = parseClientMessage('{"t":"state","pos":[1,2,3],"yaw":0,"pitch":0,"anchor":null,"mode":"fly"}');
+    expect(m).toMatchObject({ t: 'state', mode: undefined });
   });
 });
 
@@ -234,9 +273,68 @@ describe('message checks', () => {
   });
 });
 
+describe('fight rules', () => {
+  const melee = (room: Room, by: number, target: number, extra: Partial<ClientMessage & { t: 'hit' }> = {}) =>
+    room.handle(by, { t: 'hit', target, snare: false, kind: 'melee', knock: [0, 5, 3], stun: 0.4, ...extra });
+
+  it('takes damage from the kind of hit, never from the report', () => {
+    const { room, a, idA, idB } = roomWithTwo();
+    room.handle(idB, { t: 'state', pos: [0, 0, 2], yaw: 0, pitch: 0, anchor: null });
+    melee(room, idA, idB);
+    expect(a.last('damage')?.hp).toBe(100 - HITS.melee.damage);
+  });
+
+  it('moves only the player who was hit, with a capped shove', () => {
+    const { room, a, b, idA, idB } = roomWithTwo();
+    room.handle(idB, { t: 'state', pos: [0, 0, 2], yaw: 0, pitch: 0, anchor: null });
+    melee(room, idA, idB, { knock: [0, 500, 0], stun: 9 });
+    const knock = b.last('knock')!;
+    expect(knock.target).toBe(idB);
+    expect(Math.hypot(...knock.vel)).toBeCloseTo(MAX_KNOCK);
+    expect(knock.stun).toBe(MAX_STUN);
+    expect(a.last('knock')).toBeUndefined();
+  });
+
+  it('rejects a punch from across the map', () => {
+    const { room, a, idA, idB } = roomWithTwo();
+    room.handle(idB, { t: 'state', pos: [0, 0, 60], yaw: 0, pitch: 0, anchor: null });
+    melee(room, idA, idB);
+    expect(a.last('damage')).toBeUndefined();
+  });
+
+  it('lets a dodging player through untouched', () => {
+    const { room, a, idA, idB } = roomWithTwo();
+    room.handle(idB, { t: 'state', pos: [0, 0, 2], yaw: 0, pitch: 0, anchor: null, safe: true });
+    melee(room, idA, idB);
+    expect(a.last('damage')).toBeUndefined();
+  });
+
+  it('scales a ground pound by how far it fell', () => {
+    const { room, a, idA, idB, advance } = roomWithTwo();
+    room.handle(idB, { t: 'state', pos: [0, 0, 2], yaw: 0, pitch: 0, anchor: null });
+    melee(room, idA, idB, { kind: 'pound', power: 0.1 });
+    const small = 100 - a.last('damage')!.hp;
+    advance(1000);
+    melee(room, idA, idB, { kind: 'pound', power: 1 });
+    expect(100 - small - a.last('damage')!.hp).toBeGreaterThan(small * 2);
+  });
+
+  it('heals, but not over and over', () => {
+    const { room, a, b, idA, idB, hit, advance } = roomWithTwo();
+    hit();
+    advance(400);
+    hit();
+    room.handle(idB, { t: 'heal' });
+    room.handle(idB, { t: 'heal' });
+    expect(a.inbox.filter((m) => m.t === 'healed')).toHaveLength(1);
+    expect(b.last('healed')?.hp).toBe(Math.min(100, 50 + 35));
+    void idA;
+  });
+});
+
 describe('online world', () => {
   it('reports a hit on another player instead of deciding it', () => {
-    const w = new World();
+    const w = new World(null, createTestArena());
     w.setOnline(true);
     w.respawnAt({ x: 0, y: 0.05, z: 22 }, 0);
     w.dummies = [{ id: 7, pos: { x: 0, y: 0, z: 8 }, hp: 2, snareT: 0, respawnT: 0, phase: 0, dir: 1 }];
@@ -250,7 +348,7 @@ describe('online world', () => {
   });
 
   it('a ghost shot never hits anything locally', () => {
-    const w = new World();
+    const w = new World(null, createTestArena());
     w.setOnline(true);
     w.respawnAt({ x: 0, y: 0.05, z: 22 }, 0);
     w.dummies = [{ id: 7, pos: { x: 0, y: 0, z: 8 }, hp: 2, snareT: 0, respawnT: 0, phase: 0, dir: 1 }];
@@ -260,7 +358,7 @@ describe('online world', () => {
   });
 
   it('a snare cuts the web and blocks a new one', () => {
-    const w = new World();
+    const w = new World(null, createTestArena());
     w.player.pos = { x: 0, y: 14, z: 22 };
     w.player.mode = 'air';
     const step = () => w.step({ ...emptyInput(), pitch: 0.9, swing: true, aimAssist: false }, TICK);
@@ -272,7 +370,7 @@ describe('online world', () => {
   });
 
   it('turning online off brings the dummies back', () => {
-    const w = new World();
+    const w = new World(null, createTestArena());
     const count = w.dummies.length;
     w.setOnline(true);
     expect(w.dummies).toHaveLength(0);

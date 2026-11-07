@@ -1,5 +1,6 @@
 // HUD, menus and the settings screen. Plain DOM keeps the menus cheap on phones.
 
+import { MAX_HP } from './sim/hits';
 import {
   cleanCode,
   CODE_LENGTH,
@@ -7,12 +8,14 @@ import {
   MAX_ROOM_SIZE,
   ROOM_SIZES,
   type PlayerInfo,
+  type MatchState,
   type RoomSummary,
 } from './net/protocol';
 import { openControlEditor } from './control-editor';
 import { el, styleControl } from './dom';
 import type { Profile } from './profile';
 import { raycast } from './sim/map';
+import { CONTROL_POINT, GAME_MODES, MODE_INFO, type GameMode } from './sim/game-modes';
 import { dummyCenter, eyePosition, totalSpeed, TUNING } from './sim/player';
 import type { World } from './sim/world';
 import type { GameView } from './render/view';
@@ -49,6 +52,7 @@ export interface OnlineHud {
   /** Round trip to the host in milliseconds, or null with no fresh reading. */
   ping: number | null;
   isHost: boolean;
+  match: MatchState | null;
 }
 
 export class Hud {
@@ -58,11 +62,14 @@ export class Hud {
   readonly touch = el('div', 'touch');
   readonly stick = el('div', 'stick');
   readonly moveButton = el('button', 'pad pad-move', 'โหน');
-  readonly attackButton = el('button', 'pad pad-attack', 'ยิง');
+  readonly attackButton = el('button', 'pad pad-attack', 'ตี');
   readonly dashButton = el('button', 'pad pad-small pad-dash', 'พุ่ง');
   readonly snareButton = el('button', 'pad pad-small pad-snare', 'ใยรัด');
+  readonly webButton = el('button', 'pad pad-small pad-web', 'ใยพุ่ง');
+  readonly focusButton = el('button', 'pad pad-small pad-focus', 'โฟกัส');
   readonly pauseButton = el('button', 'pause-button', 'ตั้งค่า');
   readonly scoresButton = el('button', 'scores-button', 'คะแนน');
+  readonly viewButton = el('button', 'view-button', 'มุมกล้อง');
   /** Set each frame while the player holds the scoreboard key. */
   scoresKey = false;
 
@@ -84,6 +91,15 @@ export class Hud {
   private readonly dash = el('div', 'cooldown');
   private readonly snare = el('div', 'cooldown');
   private readonly anchor = el('div', 'marker anchor');
+  private readonly perch = el('div', 'marker perch');
+  private readonly hpFill = el('div', 'hp-fill');
+  private readonly hpValue = el('div', 'hp-value');
+  private readonly focusPips = [el('div', 'focus-pip'), el('div', 'focus-pip'), el('div', 'focus-pip')];
+  private readonly targetHp = el('div', 'target-hp');
+  private readonly calloutBox = el('div', 'callout');
+  private readonly hurtFlash = el('div', 'hurt-flash');
+  private calloutTimer = 0;
+  private hurtTimer = 0;
   private readonly target = el('div', 'marker target');
   private readonly ring = el('div', 'marker ring-marker');
   private readonly toastBox = el('div', 'toast');
@@ -107,6 +123,14 @@ export class Hud {
     bar.append(this.speedFill);
     speed.append(this.speedValue, bar);
 
+    const vitals = el('div', 'vitals');
+    const hpBar = el('div', 'hp-bar');
+    hpBar.append(this.hpFill, this.hpValue);
+    const focus = el('div', 'focus-bar');
+    focus.append(...this.focusPips);
+    vitals.append(hpBar, focus);
+    this.target.append(this.targetHp);
+
     const course = el('div', 'course');
     course.append(this.timer, this.best, this.rings, this.kos);
 
@@ -124,10 +148,22 @@ export class Hud {
     this.snare.dataset.label = 'ใยรัด';
     this.skills.append(this.dash, this.snare);
 
-    this.touch.append(this.stick, this.moveButton, this.attackButton, this.dashButton, this.snareButton);
+    this.touch.append(
+      this.stick,
+      this.moveButton,
+      this.attackButton,
+      this.dashButton,
+      this.snareButton,
+      this.webButton,
+      this.focusButton,
+    );
     this.root.append(
       this.speedLines,
       this.frozen,
+      this.hurtFlash,
+      vitals,
+      this.perch,
+      this.calloutBox,
       ...Object.values(this.edges),
       this.touch,
       this.anchor,
@@ -145,6 +181,7 @@ export class Hud {
       this.scoreboard,
       this.pauseButton,
       this.scoresButton,
+      this.viewButton,
     );
     parent.append(this.root);
     this.applySettings();
@@ -154,6 +191,7 @@ export class Hud {
     this.touch.classList.toggle('active', isTouchDevice());
     this.touch.classList.toggle('swapped', this.settings.swapButtons);
     this.pauseButton.hidden = !isTouchDevice();
+    this.viewButton.hidden = !isTouchDevice();
     this.scoresButton.hidden = true;
     // On touch the buttons themselves show when a skill is ready.
     this.skills.style.display = isTouchDevice() ? 'none' : '';
@@ -163,8 +201,11 @@ export class Hud {
     styleControl(this.attackButton, layout.attack);
     styleControl(this.dashButton, layout.dash);
     styleControl(this.snareButton, layout.snare);
+    styleControl(this.webButton, layout.web);
+    styleControl(this.focusButton, layout.focus);
     styleControl(this.pauseButton, layout.pause);
     styleControl(this.scoresButton, layout.scores);
+    styleControl(this.viewButton, layout.view);
   }
 
   setVisible(visible: boolean): void {
@@ -179,6 +220,25 @@ export class Hud {
     this.toastTimer = window.setTimeout(() => this.toastBox.classList.remove('on'), 1100);
   }
 
+  /** A short word of praise, for a move done well. */
+  callout(text: string, strong = false): void {
+    this.calloutBox.textContent = text;
+    this.calloutBox.classList.toggle('strong', strong);
+    this.calloutBox.classList.remove('on');
+    // Restarts the pop when two come quickly.
+    void this.calloutBox.offsetWidth;
+    this.calloutBox.classList.add('on');
+    window.clearTimeout(this.calloutTimer);
+    this.calloutTimer = window.setTimeout(() => this.calloutBox.classList.remove('on'), 900);
+  }
+
+  /** A red flash at the screen's edge when the player takes a hit. */
+  hurt(): void {
+    this.hurtFlash.classList.add('on');
+    window.clearTimeout(this.hurtTimer);
+    this.hurtTimer = window.setTimeout(() => this.hurtFlash.classList.remove('on'), 220);
+  }
+
   /** The X at the crosshair that confirms a shot landed. */
   hitConfirm(ko: boolean): void {
     this.hitMark.classList.add('on');
@@ -191,35 +251,46 @@ export class Hud {
     const p = world.player;
     const speed = totalSpeed(p);
 
-    this.speedValue.textContent = `${Math.round(speed * 3.6)} กม./ชม.`;
-    this.speedFill.style.width = `${Math.min(100, (speed / TUNING.maxSpeed) * 100)}%`;
-    this.speedLines.style.opacity = this.settings.reduceMotion
-      ? '0'
-      : String(Math.max(0, Math.min(0.9, (speed - 15) / 20)));
+    setText(this.speedValue, `${Math.round(speed * 3.6)} กม./ชม.`);
+    setStyle(this.speedFill, 'width', `${Math.round(Math.min(100, (speed / TUNING.maxSpeed) * 100))}%`);
+    setStyle(
+      this.speedLines,
+      'opacity',
+      this.settings.reduceMotion ? '0' : String(Math.round(Math.max(0, Math.min(0.9, (speed - 15) / 20)) * 50) / 50),
+    );
 
     this.frozen.classList.toggle('on', p.snareT > 0);
 
+    setStyle(this.hpFill, 'width', `${Math.round((p.hp / MAX_HP) * 100)}%`);
+    setText(this.hpValue, String(Math.round(p.hp)));
+    this.focusPips.forEach((pip, i) => {
+      setStyle(pip, 'opacity', String(Math.round(Math.min(1, Math.max(0, p.focus - i)) * 50) / 50 * 0.85 + 0.15));
+      pip.classList.toggle('full', p.focus >= i + 1);
+    });
+    this.place(this.perch, p.perch && p.targetPreview === null ? p.perch.point : null);
+    this.perch.classList.toggle('hang', p.perch?.hang === true);
+
     const pulse = this.settings.reduceMotion ? 1 : 0.82 + 0.18 * Math.sin(performance.now() / 55);
     for (const edge of ['top', 'right', 'bottom', 'left'] as const) {
-      this.edges[edge].style.opacity = (world.danger[edge] * pulse).toFixed(3);
+      setStyle(this.edges[edge], 'opacity', String(Math.round(world.danger[edge] * pulse * 50) / 50));
     }
 
     if (world.online && this.online) {
       this.updateOnline(world, this.online);
     } else {
-      this.timer.textContent = world.lapRunning ? formatTime(world.lapTime) : 'ผ่านห่วงแรกเพื่อจับเวลา';
-      this.best.textContent = world.bestLap ? `ดีที่สุด ${formatTime(world.bestLap)}` : '';
-      this.rings.textContent = `ห่วง ${world.ringIndex}/${world.map.rings.length}`;
-      this.kos.textContent = `KO ${world.kos}`;
+      setText(this.timer, world.lapRunning ? formatTime(world.lapTime) : 'ผ่านห่วงแรกเพื่อจับเวลา');
+      setText(this.best, world.bestLap ? `ดีที่สุด ${formatTime(world.bestLap)}` : '');
+      setText(this.rings, `ห่วง ${world.ringIndex}/${world.map.rings.length}`);
+      setText(this.kos, `KO ${world.kos}`);
       this.scoreboard.classList.remove('on');
       this.scoresButton.hidden = true;
-      this.koNote.textContent = '';
-      this.pingLabel.textContent = '';
-      for (const tag of this.nameTags) tag.style.display = 'none';
+      setText(this.koNote, '');
+      setText(this.pingLabel, '');
+      for (const tag of this.nameTags) setStyle(tag, 'display', 'none');
     }
 
-    this.dash.style.setProperty('--ready', String(1 - p.dashCdT / TUNING.dashCooldown));
-    this.snare.style.setProperty('--ready', String(1 - p.snareCdT / TUNING.snareCooldown));
+    setVar(this.dash, '--ready', String(Math.round((1 - p.dashCdT / TUNING.dashCooldown) * 50) / 50));
+    setVar(this.snare, '--ready', String(Math.round((1 - p.snareCdT / TUNING.snareCooldown) * 50) / 50));
     this.dashButton.classList.toggle('cooling', p.dashCdT > 0);
     this.snareButton.classList.toggle('cooling', p.snareCdT > 0);
 
@@ -228,9 +299,13 @@ export class Hud {
     // The frame is a practice aid. A real match has to be read by eye.
     const target = world.online ? undefined : world.dummies.find((d) => d.id === p.targetPreview);
     this.place(this.target, target ? dummyCenter(target) : null);
+    if (target) setStyle(this.targetHp, 'width', `${Math.round(Math.max(0, target.hp / MAX_HP) * 100)}%`);
 
-    if (world.online) this.ring.style.display = 'none';
-    else this.placeClamped(this.ring, world.map.rings[world.ringIndex]);
+    this.ring.classList.toggle('crown-marker', world.online && world.gameMode === 'crown');
+    if (world.online && world.gameMode === 'control') this.placeClamped(this.ring, { x: CONTROL_POINT.x, y: 1, z: CONTROL_POINT.z });
+    else if (world.online && world.gameMode === 'crown' && world.crown && !world.crownMine) this.placeClamped(this.ring, world.crown);
+    else if (!world.online) this.placeClamped(this.ring, world.map.rings[world.ringIndex]);
+    else this.ring.style.display = 'none';
   }
 
   private updatePing({ ping, isHost }: OnlineHud): void {
@@ -247,19 +322,23 @@ export class Hud {
     this.scoreboard.classList.toggle('on', open);
     if (!open) return;
 
-    const players = [...online.players].sort((a, b) => b.kills - a.kills || a.deaths - b.deaths);
-    const key = JSON.stringify([online.code, online.myId, players]);
+    const crownMode = online.match?.mode === 'crown';
+    const holder = online.match?.holder;
+    const players = [...online.players].sort((a, b) => Number(b.id === holder && crownMode) - Number(a.id === holder && crownMode) || (b.score ?? 0) - (a.score ?? 0) || b.kills - a.kills || a.deaths - b.deaths);
+    const key = JSON.stringify([online.code, online.myId, crownMode, holder, players]);
     if (key === this.scoreboardKey) return;
     this.scoreboardKey = key;
 
     const table = el('table');
     const head = el('tr');
-    for (const title of ['#', 'ผู้เล่น', 'KO', 'ตาย']) head.append(el('th', '', title));
+    for (const title of ['#', 'ผู้เล่น', crownMode ? 'มงกุฎ' : 'คะแนน', 'KO', 'ตาย']) head.append(el('th', '', title));
     table.append(head);
 
     players.forEach((p, i) => {
       const row = el('tr', p.id === online.myId ? 'me' : '');
-      for (const cell of [String(i + 1), p.name, String(p.kills), String(p.deaths)]) {
+      const team = p.team ? (p.team === 'red' ? '🔴 ' : '🔵 ') : '';
+      const score = crownMode ? (p.id === holder ? '👑' : '—') : String(p.score ?? 0);
+      for (const cell of [String(i + 1), `${team}${p.name}`, score, String(p.kills), String(p.deaths)]) {
         row.append(el('td', '', cell));
       }
       table.append(row);
@@ -269,10 +348,20 @@ export class Hud {
 
   private updateOnline(world: World, online: OnlineHud): void {
     const me = online.players.find((p) => p.id === online.myId);
-    this.timer.textContent = `ห้อง ${online.code}`;
-    this.best.textContent = `KO ${me?.kills ?? 0}`;
-    this.rings.textContent = '';
-    this.kos.textContent = '';
+    const match = online.match;
+    const mode = match?.mode ?? 'deathmatch';
+    const time = match?.remaining ?? 0;
+    this.timer.textContent = `${MODE_INFO[mode].name} · ${Math.floor(time / 60)}:${String(time % 60).padStart(2, '0')}`;
+    const holder = online.players.find((p) => p.id === match?.holder);
+    this.best.textContent = match?.phase === 'waiting'
+      ? 'รอผู้เล่นอย่างน้อย 2 คน'
+      : match?.phase === 'finished'
+        ? `${match.result} เริ่มรอบใหม่ในอีกสักครู่`
+        : mode === 'crown'
+          ? match?.holder === online.myId ? '👑 คุณกำลังถือมงกุฎ!' : holder ? `👑 ${holder.name} กำลังถือมงกุฎ` : '👑 มงกุฎอยู่บนพื้น ไปเก็บเลย'
+          : `คะแนน ${me?.score ?? 0}/${MODE_INFO[mode].goal}`;
+    this.rings.textContent = mode === 'teams' && match ? `🔴 ${match.teamScores.red}  ·  🔵 ${match.teamScores.blue}` : mode === 'control' ? (match?.holder === online.myId ? 'กำลังยึดจุด!' : 'ยืนในวงโดยไม่มีคนอื่นเพื่อเก็บคะแนน') : mode === 'crown' ? 'KO คนถือเพื่อชิงมงกุฎ ถือไว้ตอนหมดเวลาเพื่อชนะ' : '';
+    this.kos.textContent = `ห้อง ${online.code}`;
 
     this.scoresButton.hidden = !isTouchDevice();
     this.updateScoreboard(online);
@@ -296,18 +385,20 @@ export class Hud {
       const dist = Math.hypot(dx, dy, dz) || 1;
       const blocked = raycast(world.map, eye, { x: dx / dist, y: dy / dist, z: dz / dist }, dist);
       this.place(tag, blocked ? null : head);
-      tag.firstElementChild!.textContent = d.name ?? '';
+      const team = d.team ? (d.team === 'red' ? '🔴 ' : '🔵 ') : '';
+      const crown = mode === 'crown' && match?.holder === d.id ? '👑 ' : '';
+      setText(tag.firstElementChild as HTMLElement, `${crown}${team}${d.name ?? ''} ${Math.max(0, Math.round(d.hp))}`);
     });
   }
 
   private place(node: HTMLElement, point: { x: number; y: number; z: number } | null): void {
     const s = point ? this.view.toScreen(point) : null;
     if (!s || s.behind) {
-      node.style.display = 'none';
+      setStyle(node, 'display', 'none');
       return;
     }
-    node.style.display = 'block';
-    node.style.transform = `translate(${s.x}px, ${s.y}px)`;
+    setStyle(node, 'display', 'block');
+    setStyle(node, 'transform', `translate(${Math.round(s.x)}px, ${Math.round(s.y)}px)`);
   }
 
   /** Keeps the next-ring marker on screen, pinned to the edge when the ring is out of view. */
@@ -323,9 +414,25 @@ export class Hud {
     }
     x = Math.max(margin, Math.min(w - margin, x));
     y = Math.max(margin, Math.min(h - margin, y));
-    node.style.display = 'block';
-    node.style.transform = `translate(${x}px, ${y}px)`;
+    setStyle(node, 'display', 'block');
+    setStyle(node, 'transform', `translate(${Math.round(x)}px, ${Math.round(y)}px)`);
   }
+}
+
+/**
+ * The HUD changes every frame, but most of it holds still. Writing a value, even the same
+ * one, makes the browser restyle and repaint, so these only write what changed.
+ */
+function setText(node: HTMLElement, value: string): void {
+  if (node.textContent !== value) node.textContent = value;
+}
+
+function setStyle(node: HTMLElement, property: 'opacity' | 'width' | 'display' | 'transform', value: string): void {
+  if (node.style[property] !== value) node.style[property] = value;
+}
+
+function setVar(node: HTMLElement, name: string, value: string): void {
+  if (node.style.getPropertyValue(name) !== value) node.style.setProperty(name, value);
 }
 
 // -------------------------------------------------------------------- menus
@@ -336,7 +443,8 @@ export interface MenuActions {
   restart(): void;
   quit(): void;
   settingsChanged(): void;
-  createRoom(name: string, maxPlayers: number): void;
+  createRoom(name: string, maxPlayers: number, mode: GameMode, privateRoom: boolean): void;
+  quickPlay(name: string): void;
   joinRoom(code: string, name: string): void;
   /** The online screen opened: start refreshing the room board. */
   openLobby(): void;
@@ -448,7 +556,7 @@ export class Menus {
       ...rooms.map((room) => {
         const row = el('div', 'room-row');
         const about = el('div', 'room-about');
-        about.append(el('strong', '', `ห้องของ ${room.host}`), el('span', '', `รหัส ${room.code}`));
+        about.append(el('strong', '', `ห้องของ ${room.host}`), el('span', '', `${MODE_INFO[room.mode ?? 'deathmatch'].name} · รหัส ${room.code}`));
         const full = room.players >= room.max;
         const join = el('button', 'key', full ? 'เต็ม' : 'เข้า');
         join.disabled = full;
@@ -480,6 +588,28 @@ export class Menus {
     const sizeRow = el('label', 'row');
     sizeRow.append(el('span', '', 'จำกัดจำนวนผู้เล่น'), size);
 
+    const mode = el('select');
+    mode.setAttribute('aria-label', 'เลือกโหมดการเล่น');
+    for (const id of GAME_MODES) {
+      const option = el('option', '', MODE_INFO[id].name);
+      option.value = id;
+      mode.append(option);
+    }
+    const modeRow = el('label', 'row');
+    modeRow.append(el('span', '', 'โหมดการเล่น'), mode);
+    const modeHelp = el('p', 'mode-help', MODE_INFO.deathmatch.description);
+    mode.addEventListener('change', () => { modeHelp.textContent = MODE_INFO[mode.value as GameMode].description; });
+
+    const visibility = el('select');
+    visibility.setAttribute('aria-label', 'การมองเห็นห้อง');
+    for (const [value, label] of [['private', 'ส่วนตัว — เข้าด้วยรหัส'], ['public', 'สาธารณะ — ให้คนสุ่มเข้าได้']]) {
+      const option = el('option', '', label);
+      option.value = value;
+      visibility.append(option);
+    }
+    const visibilityRow = el('label', 'row');
+    visibilityRow.append(el('span', '', 'ห้อง'), visibility);
+
     const codeInput = el('input', 'code');
     codeInput.maxLength = CODE_LENGTH;
     codeInput.placeholder = 'รหัสห้อง';
@@ -509,8 +639,13 @@ export class Menus {
     form.append(
       el('h2', '', 'เล่นออนไลน์'),
       name,
+      this.button('สุ่มเล่นกับผู้เล่นอื่น', () => this.actions.quickPlay(name.value), !code),
+      el('h3', '', 'สร้างห้องกับเพื่อน'),
+      modeRow,
+      modeHelp,
       sizeRow,
-      this.button('สร้างห้องใหม่', () => this.actions.createRoom(name.value, Number(size.value)), !code),
+      visibilityRow,
+      this.button('สร้างห้องใหม่', () => this.actions.createRoom(name.value, Number(size.value), mode.value as GameMode, visibility.value === 'private')),
       el('h3', '', 'มีรหัสจากเพื่อน'),
       codeInput,
       this.button('เข้าห้อง', join, !!code),
@@ -574,6 +709,7 @@ export class Menus {
           ['กระโดด / โหนใย', `${keyName(k.jump)} / ${keyName(k.swing)} ค้าง`],
           ['ยิงใย / ใยรัด', `${keyName(k.shoot)} / ${keyName(k.snare)}`],
           ['พุ่งหลบ / สไลด์', `${keyName(k.dash)} / ${keyName(k.slide)} ค้าง`],
+          ['สลับมุมกล้อง', keyName(k.view)],
         ];
 
     const list = el('dl', 'guide');
@@ -653,6 +789,10 @@ export class Menus {
       }),
       range('มุมมองกล้อง (FOV)', s.fov, 70, 110, 1, (v) => {
         s.fov = v;
+        changed();
+      }),
+      toggle('เริ่มด้วยมุมบุคคลที่ 3', s.thirdPerson, (v) => {
+        s.thirdPerson = v;
         changed();
       }),
       toggle('ลดการเคลื่อนไหวของกล้อง (ช่วยลดอาการเวียนหัว)', s.reduceMotion, (v) => {

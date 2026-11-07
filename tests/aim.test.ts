@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { AIM, findAimTarget, viewForward } from '../src/sim/aim';
-import { createArena, type V3 } from '../src/sim/map';
+import type { V3 } from '../src/sim/map';
 import type { Dummy } from '../src/sim/player';
+import { createTestArena } from './test-map';
 
-const map = createArena();
+const map = createTestArena();
 const eye: V3 = { x: 0, y: 5, z: 20 };
 
 function target(x: number, z = 0, y = 4): Dummy {
@@ -27,7 +28,7 @@ describe('finding a target', () => {
   });
 
   it('does not reach far from the crosshair', () => {
-    expect(findAimTarget(eye, viewForward(0, 0), map, [target(2)], AIM.magnetRadius)).toBeNull();
+    expect(findAimTarget(eye, viewForward(0, 0), map, [target(3)], AIM.magnetRadius)).toBeNull();
   });
 
   it('caps the help on a close target, so it cannot catch wild shots', () => {

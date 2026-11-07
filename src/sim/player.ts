@@ -2,7 +2,35 @@
 // same code can run on a future server. All speeds are metres per second.
 
 import { AIM, dummyCenter, findAimTarget, viewForward } from './aim';
-import { raycast, type Box, type GameMap, type V3 } from './map';
+import type { Act, HitKind } from './hits';
+import type { Team } from './game-modes';
+import { MAX_HP } from './hits';
+import { JUMP_PAD_RADIUS, nearbyBoxes, raycast, type Box, type GameMap, type RayHit, type V3 } from './map';
+import {
+  applyKnock,
+  findPerch,
+  hardLanding,
+  holdLine,
+  landPound,
+  MOVES,
+  pressFocus,
+  pressWeb,
+  startDodge,
+  startPound,
+  stepAttackHold,
+  stepCharge,
+  stepHang,
+  stepMoveTimers,
+  stepStrike,
+  stepWebHold,
+  stepZip,
+  tryCrate,
+  tryJumpMoves,
+  tryMelee,
+  type CrateSpot,
+  type MoveContext,
+  type Perch,
+} from './moves';
 
 export { dummyCenter, viewForward };
 
@@ -17,11 +45,14 @@ export const TUNING = {
   /** Extra weight on the way down, so jumps rise quickly and drop hard rather than float. */
   fallGravityScale: 1.3,
   maxFallSpeed: 60,
+  /** Upward cap. High enough for a jump pad, which is the fastest way up. */
+  maxRiseSpeed: 50,
   jumpSpeed: 12.3,
   coyoteTime: 0.1,
   jumpBuffer: 0.12,
 
-  runSpeed: 11,
+  /** Full stick. Part of the way is a walk, down to a stroll. */
+  runSpeed: 8,
   groundAccel: 70,
   groundFriction: 45,
   overspeedDecay: 5,
@@ -31,6 +62,12 @@ export const TUNING = {
   /** Horizontal cap. Falling has its own cap, so a long drop can't eat forward speed. */
   maxSpeed: 40,
 
+  /** Reaches about 29 metres, which clears every edge roof. */
+  padLaunchSpeed: 46,
+  padCooldown: 0.6,
+  /** How far above a pad the feet can be and still set it off. */
+  padReach: 0.6,
+
   stepHeight: 0.55,
   vaultHeight: 1.6,
 
@@ -39,10 +76,43 @@ export const TUNING = {
   slideFriction: 3,
   slideCooldown: 0.8,
 
+  /** Speed along a wall that catches it without pressing toward it. */
   wallMinSpeed: 6,
-  wallMaxTime: 1.9,
+  /** Anything shorter is a kerb or a beam, not a wall. */
+  wallMinHeight: 2.5,
+  /** Past this falling speed, a wall can't be caught. */
+  wallGripFall: 26,
   wallGravityScale: 0.16,
-  wallAccel: 6,
+  /** Speed the player works up to on their own. Anything above that is momentum. */
+  wallClimbSpeed: 6,
+  wallClimbAccel: 34,
+  /** How quickly speed along a wall fades, per second. Low, so a fast run keeps going. */
+  wallDrag: 0.8,
+  /** Share of gravity that slows a rise up a wall. */
+  wallRiseGravityScale: 0.5,
+  /** With no input the player slips down at this speed. A wall never holds them still. */
+  wallSlipSpeed: 3.5,
+  wallSlipBrake: 40,
+  /** Share of impact speed turned into a rise when hitting a wall head on. */
+  wallFling: 0.55,
+  wallFlingMax: 16,
+  /** Hitting a wall this fast, straight on, is too hard to hold: the player bounces off dazed. */
+  wallSlamSpeed: 26,
+  /** Share of the hit that throws the player back off the wall. */
+  wallSlamBounce: 0.3,
+  wallSlamBounceMax: 9,
+  /** How long a hard hit leaves the player unable to grab, web or dash. */
+  wallSlamStun: 0.7,
+  /** Share of air control left while dazed. */
+  stunAirControl: 0.25,
+  /** Pressing this far away from the wall lets go. */
+  wallLetGo: 0.6,
+  wallPushOff: 4,
+  /** How far up the player has to look to start climbing from the ground. */
+  wallLookUp: 0.3,
+  /** The hop over the top of a wall. */
+  wallMantleUp: 7,
+  wallMantleIn: 5,
   wallSpeedCap: 21,
   wallJumpOut: 8,
   wallJumpUp: 12.5,
@@ -85,9 +155,10 @@ export const TUNING = {
   /** Above this speed the turn rate falls off, so fast flight carries more weight. */
   airTurnFullSpeed: 18,
 
-  shotSpeed: 120,
+  /** Fast enough that there's almost no need to lead a target, even across the arena. */
+  shotSpeed: 260,
   shotRange: 90,
-  shotRadius: 0.8,
+  shotRadius: 1.1,
   shotCooldown: 0.28,
 
   /** How long a snare freezes its target. */
@@ -95,7 +166,14 @@ export const TUNING = {
   snareCooldown: 2.5,
 } as const;
 
-export type Mode = 'ground' | 'air' | 'wall' | 'swing' | 'dash';
+/**
+ * zip: flying to a ledge. hang: on a line, climbing it or letting it out.
+ * strike: zipping at someone to kick them. pound: slamming straight down.
+ */
+export type Mode = 'ground' | 'air' | 'wall' | 'swing' | 'dash' | 'zip' | 'hang' | 'strike' | 'pound';
+
+/** What the body is doing, as other players see it. */
+export type PoseName = Mode | 'slide' | 'stun' | Act;
 
 export type WebAssist = 'off' | 'near' | 'wide';
 
@@ -109,15 +187,24 @@ export interface TickInput {
   /** Edge-triggered: true for the one tick the action was pressed. */
   jump: boolean;
   dash: boolean;
+  /** Attack: a punch up close, a web shot otherwise. */
   shoot: boolean;
   snare: boolean;
+  /** The web on someone, or onto a ledge or a line. */
+  web: boolean;
+  /** Heal, finish, or a trick in the air. */
+  focus: boolean;
   /** Held. */
   swing: boolean;
   slide: boolean;
+  shootHeld: boolean;
+  webHeld: boolean;
   /** Lets a shot that just misses bend onto the target. */
   aimAssist: boolean;
   /** Widens aim help. 1 on a mouse, higher on touch screens. */
   aimScale: number;
+  /** Where aim starts when the view isn't at the eyes, so the crosshair stays true in third person. */
+  aimFrom: V3 | null;
   /** off: exact crosshair only. near: also just around it. wide: also anywhere ahead, for touch. */
   webAssist: WebAssist;
 }
@@ -132,10 +219,15 @@ export function emptyInput(): TickInput {
     dash: false,
     shoot: false,
     snare: false,
+    web: false,
+    focus: false,
     swing: false,
     slide: false,
+    shootHeld: false,
+    webHeld: false,
     aimAssist: true,
     aimScale: 1,
+    aimFrom: null,
     webAssist: 'off',
   };
 }
@@ -150,10 +242,25 @@ export interface Dummy {
   dir: 1 | -1;
   /** Online only: the other player this target stands for. */
   name?: string;
+  team?: Team;
+  /** Teammates remain visible but cannot be targeted. */
+  ally?: boolean;
   yaw?: number;
   anchor?: V3 | null;
   /** Where this target is aiming, if it is. Feeds the danger sense. */
   aim?: V3;
+  /** What the other player is doing, which picks their animation. */
+  mode?: PoseName;
+  /** Physical movement, independent of the short action animation. */
+  motion?: Mode;
+  /** In practice: thrown through the air by a hit, until it lands. */
+  vel?: V3;
+  /** In practice: dazed by a hit for this long. */
+  knockT?: number;
+  /** In practice: stuck to a wall it was thrown into. */
+  pinned?: boolean;
+  /** In practice: walking back to its path after being knocked off it. */
+  homing?: boolean;
 }
 
 export interface Player {
@@ -170,12 +277,15 @@ export interface Player {
   slideCdT: number;
   dashT: number;
   dashCdT: number;
-  wallT: number;
   wallCdT: number;
   wallNormal: V3;
-  wallTangent: V3;
-  lastWall: Box | null;
   impactSpeed: number;
+  /** The hardest speed straight into a wall this tick. */
+  slamSpeed: number;
+  /** Time left dazed after slamming into a wall. */
+  stunT: number;
+  padCdT: number;
+  aimFrom: V3 | null;
 
   anchor: V3 | null;
   ropeLen: number;
@@ -188,17 +298,78 @@ export interface Player {
 
   shotCdT: number;
   snareCdT: number;
+  healCdT: number;
   /** Time left frozen by an enemy snare. */
   snareT: number;
   /** The dummy a shot would bend onto if fired now. */
   targetPreview: number | null;
+
+  hp: number;
+  /** Earned by fighting and moving well. Spent to heal or finish someone. */
+  focus: number;
+  /** A short move the body is making, and for how much longer. */
+  act: Act | null;
+  actT: number;
+
+  /** Where a web press would zip to or hang from. */
+  perch: Perch | null;
+  /** Just landed on a perch: a jump now launches off it. */
+  perchT: number;
+  zipTarget: V3 | null;
+  zipT: number;
+  /** Where a web line runs to, to draw it: a ledge, a line's top, someone being pulled. */
+  webLine: V3 | null;
+  webLineT: number;
+  /** Hanging over a roof edge: the way back over it. */
+  hangIn: V3 | null;
+
+  charge: number;
+  slideHeld: boolean;
+  landT: number;
+  landSpeed: number;
+  dodgeT: number;
+  dodgeJumpT: number;
+
+  comboStep: number;
+  comboT: number;
+  attackCdT: number;
+  attackBufT: number;
+  attackHoldT: number;
+  holdUsed: boolean;
+  followT: number;
+  sinceHitT: number;
+  lastTarget: number | null;
+  lastTargetPos: V3 | null;
+  webTarget: number | null;
+  webHoldT: number;
+  webPending: boolean;
+  spinT: number;
+  spins: number;
+  strikeId: number | null;
+  strikeT: number;
+  strikeSplash: boolean;
+  poundFrom: number;
+  tricks: number;
+  trickT: number;
+  trickKind: number;
+  crateCdT: number;
 }
 
 export type GameEvent =
   | { type: 'shot'; origin: V3; dir: V3; snare: boolean }
   | { type: 'jump' }
   | { type: 'wallJump' }
-  | { type: 'land'; speed: number };
+  | { type: 'jumpPad'; index: number }
+  | { type: 'land'; speed: number }
+  | { type: 'slam'; speed: number }
+  | { type: 'hitTarget'; target: number; kind: HitKind; knock: V3; stun: number; pin: boolean; power: number }
+  | { type: 'perfect'; what: 'release' | 'dodge' | 'hit' | 'recover' }
+  | { type: 'pointLaunch' }
+  | { type: 'pound'; at: V3; radius: number }
+  | { type: 'finisher' }
+  | { type: 'trick'; kind: number }
+  | { type: 'heal'; amount: number }
+  | { type: 'pullCrate'; crate: number };
 
 export function createPlayer(pos: V3, yaw: number): Player {
   return {
@@ -214,12 +385,13 @@ export function createPlayer(pos: V3, yaw: number): Player {
     slideCdT: 0,
     dashT: 0,
     dashCdT: 0,
-    wallT: 0,
     wallCdT: 0,
     wallNormal: { x: 0, y: 0, z: 0 },
-    wallTangent: { x: 0, y: 0, z: 0 },
-    lastWall: null,
     impactSpeed: 0,
+    slamSpeed: 0,
+    stunT: 0,
+    padCdT: 0,
+    aimFrom: null,
     anchor: null,
     ropeLen: 0,
     ropeT: 0,
@@ -227,13 +399,59 @@ export function createPlayer(pos: V3, yaw: number): Player {
     swingLatchT: 0,
     shotCdT: 0,
     snareCdT: 0,
+    healCdT: 0,
     snareT: 0,
     targetPreview: null,
+    hp: MAX_HP,
+    focus: 0,
+    act: null,
+    actT: 0,
+    perch: null,
+    perchT: 0,
+    zipTarget: null,
+    zipT: 0,
+    webLine: null,
+    webLineT: 0,
+    hangIn: null,
+    charge: 0,
+    slideHeld: false,
+    landT: 0,
+    landSpeed: 0,
+    dodgeT: 0,
+    dodgeJumpT: 0,
+    comboStep: 0,
+    comboT: 0,
+    attackCdT: 0,
+    attackBufT: 0,
+    attackHoldT: 0,
+    holdUsed: false,
+    followT: 0,
+    sinceHitT: Infinity,
+    lastTarget: null,
+    lastTargetPos: null,
+    webTarget: null,
+    webHoldT: 0,
+    webPending: false,
+    spinT: 0,
+    spins: 0,
+    strikeId: null,
+    strikeT: 0,
+    strikeSplash: false,
+    poundFrom: 0,
+    tricks: 0,
+    trickT: 0,
+    trickKind: 0,
+    crateCdT: 0,
   };
 }
 
 export const horizontalSpeed = (p: Player): number => Math.hypot(p.vel.x, p.vel.z);
 export const totalSpeed = (p: Player): number => Math.hypot(p.vel.x, p.vel.y, p.vel.z);
+
+/** Where shots and webs start. */
+function aimPoint(p: Player): V3 {
+  return p.aimFrom ?? eyePosition(p);
+}
 
 export function eyePosition(p: Player): V3 {
   const eye = p.sliding ? TUNING.slideEye : TUNING.standEye;
@@ -254,7 +472,7 @@ function wishDirection(yaw: number, moveX: number, moveZ: number): V3 {
 
 type Axis = 'x' | 'y' | 'z';
 
-function overlaps(p: Player, box: Box, height = p.height): boolean {
+function overlaps(p: Pick<Player, 'pos' | 'height'>, box: Box, height = p.height): boolean {
   const r = TUNING.radius;
   return (
     p.pos.x + r > box.min.x &&
@@ -266,9 +484,10 @@ function overlaps(p: Player, box: Box, height = p.height): boolean {
   );
 }
 
-function spaceIsFree(map: GameMap, p: Player, x: number, y: number, z: number, height: number): boolean {
+export function spaceIsFree(map: GameMap, p: Pick<Player, 'pos' | 'height'>, x: number, y: number, z: number, height: number): boolean {
   const probe = { ...p, pos: { x, y, z } };
-  return !map.boxes.some((b) => overlaps(probe, b, height));
+  const r = TUNING.radius;
+  return !nearbyBoxes(map, x - r, z - r, x + r, z + r).some((b) => overlaps(probe, b, height));
 }
 
 const EPS = 0.001;
@@ -276,19 +495,26 @@ const EPS = 0.001;
 interface MoveResult {
   landed: boolean;
   blocked: Box | null;
+  /** Which way is out of the face that blocked the move. */
+  normal: V3 | null;
 }
 
 /** Moves one axis at a time and stops at the first solid box. */
-function moveAndCollide(p: Player, map: GameMap, dt: number, canStep: boolean): MoveResult {
-  const result: MoveResult = { landed: false, blocked: null };
+export function moveAndCollide(p: Player, map: GameMap, dt: number, canStep: boolean): MoveResult {
+  const result: MoveResult = { landed: false, blocked: null, normal: null };
   const r = TUNING.radius;
 
   for (const axis of ['x', 'z', 'y'] as Axis[]) {
     const delta = p.vel[axis] * dt;
     if (delta === 0) continue;
+    const before = p.pos[axis];
     p.pos[axis] += delta;
 
-    for (const box of map.boxes) {
+    const minX = (axis === 'x' ? Math.min(before, p.pos.x) : p.pos.x) - r;
+    const maxX = (axis === 'x' ? Math.max(before, p.pos.x) : p.pos.x) + r;
+    const minZ = (axis === 'z' ? Math.min(before, p.pos.z) : p.pos.z) - r;
+    const maxZ = (axis === 'z' ? Math.max(before, p.pos.z) : p.pos.z) + r;
+    for (const box of nearbyBoxes(map, minX, minZ, maxX, maxZ)) {
       if (!overlaps(p, box)) continue;
 
       if (axis !== 'y') {
@@ -304,8 +530,10 @@ function moveAndCollide(p: Player, map: GameMap, dt: number, canStep: boolean): 
         }
         p.pos[axis] = delta > 0 ? box.min[axis] - r - EPS : box.max[axis] + r + EPS;
         p.impactSpeed = Math.max(p.impactSpeed, horizontalSpeed(p));
+        p.slamSpeed = Math.max(p.slamSpeed, Math.abs(p.vel[axis]));
         p.vel[axis] = 0;
         result.blocked = box;
+        result.normal = { x: axis === 'x' ? -Math.sign(delta) : 0, y: 0, z: axis === 'z' ? -Math.sign(delta) : 0 };
       } else if (delta > 0) {
         p.pos.y = box.min.y - p.height - EPS;
         p.vel.y = 0;
@@ -324,26 +552,185 @@ interface WallContact {
   normal: V3;
 }
 
-function findRunWall(p: Player, map: GameMap): WallContact | null {
-  const reach = 0.16;
-  const probes: V3[] = [
-    { x: 1, y: 0, z: 0 },
-    { x: -1, y: 0, z: 0 },
-    { x: 0, y: 0, z: 1 },
-    { x: 0, y: 0, z: -1 },
-  ];
-  for (const dir of probes) {
-    const probe = {
-      ...p,
-      pos: { x: p.pos.x + dir.x * reach, y: p.pos.y, z: p.pos.z + dir.z * reach },
-    };
-    for (const box of map.boxes) {
-      if (box.kind === 'run' && overlaps(probe, box)) {
-        return { box, normal: { x: -dir.x, y: 0, z: -dir.z } };
-      }
-    }
+const WALL_REACH = 0.16;
+const WALL_PROBES: V3[] = [
+  { x: 1, y: 0, z: 0 },
+  { x: -1, y: 0, z: 0 },
+  { x: 0, y: 0, z: 1 },
+  { x: 0, y: 0, z: -1 },
+];
+
+export function isClimbable(box: Box): boolean {
+  if (box.kind === 'ground' || box.kind === 'bound' || box.kind === 'prop') return false;
+  return box.max.y - box.min.y >= TUNING.wallMinHeight;
+}
+
+/**
+ * Which way is out of a climbable wall next to `pos`, or null with none in reach.
+ * Other players only send their mode, so this is how their bodies find the wall they hold.
+ */
+export function climbWallNormal(map: GameMap, pos: V3, reach = 0.45): V3 | null {
+  for (const dir of WALL_PROBES) {
+    const probe = { pos: { x: pos.x + dir.x * reach, y: pos.y, z: pos.z + dir.z * reach }, height: TUNING.standHeight };
+    const r = TUNING.radius;
+    if (nearbyBoxes(map, probe.pos.x - r, probe.pos.z - r, probe.pos.x + r, probe.pos.z + r).some((b) => isClimbable(b) && overlaps(probe, b))) return { x: -dir.x, y: 0, z: -dir.z };
   }
   return null;
+}
+
+/**
+ * The wall beside the player. Touching two at once, it picks the one they are heading
+ * for, which is how a climb turns an inside corner. Otherwise it stays on the same face.
+ */
+function findClimbWall(p: Player, map: GameMap, wish: V3): WallContact | null {
+  let best: WallContact | null = null;
+  let bestScore = -Infinity;
+  for (const dir of WALL_PROBES) {
+    const probe = {
+      ...p,
+      pos: { x: p.pos.x + dir.x * WALL_REACH, y: p.pos.y, z: p.pos.z + dir.z * WALL_REACH },
+    };
+    const r = TUNING.radius;
+    const box = nearbyBoxes(map, probe.pos.x - r, probe.pos.z - r, probe.pos.x + r, probe.pos.z + r).find((b) => isClimbable(b) && overlaps(probe, b));
+    if (!box) continue;
+
+    const current = dir.x === -p.wallNormal.x && dir.z === -p.wallNormal.z;
+    const heading = (p.vel.x + wish.x * TUNING.wallClimbSpeed) * dir.x + (p.vel.z + wish.z * TUNING.wallClimbSpeed) * dir.z;
+    const score = heading + (current ? 0.5 : 0);
+    if (score > bestScore) {
+      bestScore = score;
+      best = { box, normal: { x: -dir.x, y: 0, z: -dir.z } };
+    }
+  }
+  return best;
+}
+
+/** Catches a wall if the player means to. Drifting past one without pressing toward it stays a fall. */
+function tryGrabWall(p: Player, map: GameMap, wish: V3): void {
+  const T = TUNING;
+  const wall = findClimbWall(p, map, wish);
+  if (!wall || p.vel.y < -T.wallGripFall) return;
+
+  const n = wall.normal;
+  const tx = -n.z;
+  const tz = n.x;
+  const along = p.vel.x * tx + p.vel.z * tz;
+  const pressing = -(wish.x * n.x + wish.z * n.z) > 0.3;
+  // The wall can be caught just before the hit, so speed still heading in counts too.
+  const into = -(p.vel.x * n.x + p.vel.z * n.z);
+  if (Math.max(p.slamSpeed, into) >= T.wallSlamSpeed) {
+    slamWall(p, n, Math.max(p.slamSpeed, into));
+    return;
+  }
+  const impact = Math.max(p.impactSpeed, into);
+  const glancing = Math.abs(along) >= T.wallMinSpeed && impact > 0.5;
+  const leaving = p.vel.x * n.x + p.vel.z * n.z > 1;
+  if (leaving || (!pressing && !glancing)) return;
+
+  p.mode = 'wall';
+  p.sliding = false;
+  p.wallNormal = n;
+  if (Math.abs(along) > 2) {
+    // Momentum lost to the impact is carried along the wall, so a slanted
+    // approach doesn't punish the player for touching it.
+    const carried = Math.min(T.wallSpeedCap, Math.max(Math.abs(along), impact * 0.85));
+    const sign = along >= 0 ? 1 : -1;
+    p.vel.x = tx * carried * sign;
+    p.vel.z = tz * carried * sign;
+    p.vel.y = Math.max(p.vel.y, 1.5);
+  } else {
+    // Head on, the same speed throws the player up the wall instead.
+    p.vel.x = tx * along;
+    p.vel.z = tz * along;
+    p.vel.y = Math.max(p.vel.y, 0) + Math.min(T.wallFlingMax, impact * T.wallFling);
+  }
+}
+
+/**
+ * Too hard a hit to hold on: the player bounces back off the wall, loses their web and
+ * is dazed for a moment, so a reckless line costs something.
+ */
+function slamWall(p: Player, n: V3, speed: number): void {
+  const T = TUNING;
+  // Whatever was still heading into the wall stops. Speed along it mostly goes too.
+  const into = Math.max(0, -(p.vel.x * n.x + p.vel.z * n.z));
+  const out = Math.min(T.wallSlamBounceMax, speed * T.wallSlamBounce);
+  p.vel.x = (p.vel.x + n.x * into) * 0.35 + n.x * out;
+  p.vel.z = (p.vel.z + n.z * into) * 0.35 + n.z * out;
+  p.vel.y = Math.max(0, p.vel.y * 0.3) + 2;
+  p.stunT = T.wallSlamStun;
+  p.slamSpeed = 0;
+  p.sliding = false;
+  p.dashT = 0;
+  enterAir(p);
+  slams.push(speed);
+}
+
+/** Slams this tick, picked up as events once the tick has its event list. */
+const slams: number[] = [];
+
+/** Moves `value` toward `target`, but never slows momentum that is already past it. */
+function steer(value: number, target: number, step: number): number {
+  if (target > 0 && value >= target) return value;
+  if (target < 0 && value <= target) return value;
+  return value + Math.max(-step, Math.min(step, target - value));
+}
+
+/**
+ * On a wall the player keeps their speed and steers it, rather than being held in place:
+ * where they look decides the way, momentum fades slowly, and doing nothing slips them
+ * down. Pushing into the wall while facing it is climbing up.
+ */
+function stepWallVelocity(p: Player, input: TickInput, dt: number): void {
+  const T = TUNING;
+  const n = p.wallNormal;
+  const tx = -n.z;
+  const tz = n.x;
+  const look = viewForward(p.yaw, p.pitch);
+  const rightX = Math.cos(p.yaw);
+  const rightZ = -Math.sin(p.yaw);
+
+  const forward = input.moveZ;
+  const facing = Math.max(0, -(look.x * n.x + look.z * n.z));
+  let along = forward * (look.x * tx + look.z * tz) + input.moveX * (rightX * tx + rightZ * tz);
+  let up = forward * look.y;
+  // Facing the wall, pushing forward means up, unless the player is looking down it.
+  if (forward > 0 && look.y > -0.35) up += forward * facing;
+  const amount = Math.hypot(along, up);
+  if (amount > 1) {
+    along /= amount;
+    up /= amount;
+  }
+
+  // Pushing the way they are already going keeps a fast wall run alive.
+  let side = p.vel.x * tx + p.vel.z * tz;
+  if (along * side <= 0.3) side *= Math.exp(-T.wallDrag * dt);
+  if (Math.abs(along) > 0.05) side = steer(side, along * T.wallClimbSpeed, T.wallClimbAccel * dt);
+
+  let rise = p.vel.y;
+  if (rise > 0) rise -= T.gravity * T.wallRiseGravityScale * dt;
+  if (Math.abs(up) > 0.05) {
+    rise = steer(rise, up * T.wallClimbSpeed, T.wallClimbAccel * dt);
+  } else {
+    rise -= T.gravity * T.wallGravityScale * dt;
+    if (rise < -T.wallSlipSpeed) rise = Math.min(-T.wallSlipSpeed, rise + T.wallSlipBrake * dt);
+  }
+
+  p.vel.x = tx * side;
+  p.vel.z = tz * side;
+  p.vel.y = rise;
+}
+
+/** Past the top of a wall, a climb turns into a hop onto the roof. */
+function leaveWall(p: Player, input: TickInput): void {
+  const T = TUNING;
+  if (p.vel.y > 1 && input.moveZ > 0.1) {
+    p.vel.y = Math.max(p.vel.y, T.wallMantleUp);
+    p.vel.x -= p.wallNormal.x * T.wallMantleIn;
+    p.vel.z -= p.wallNormal.z * T.wallMantleIn;
+  }
+  p.wallCdT = T.wallCooldown;
+  enterAir(p);
 }
 
 // ------------------------------------------------------------------ aiming
@@ -357,12 +744,12 @@ const NEAR_SPOKES = 8;
  * closest point around it, so a near miss on a beam still catches.
  */
 export function findAnchor(p: Player, map: GameMap, assist: WebAssist): V3 | null {
-  const eye = eyePosition(p);
-  const valid = (point: V3, t: number) => t > 3 && point.y > eye.y - 1;
+  const eye = aimPoint(p);
+  const valid = (h: RayHit) => h.box.kind !== 'bound' && h.t > 3 && h.point.y > eye.y - 1;
 
   const direct = viewForward(p.yaw, p.pitch);
   const hit = raycast(map, eye, direct, TUNING.ropeRange);
-  if (hit && valid(hit.point, hit.t)) return hit.point;
+  if (hit && valid(hit)) return hit.point;
   if (assist === 'off') return null;
 
   for (const ring of NEAR_RINGS) {
@@ -372,7 +759,7 @@ export function findAnchor(p: Player, map: GameMap, assist: WebAssist): V3 | nul
       const pitch = p.pitch + Math.cos(angle) * ring;
       const yaw = p.yaw + (Math.sin(angle) * ring) / Math.max(0.3, Math.cos(p.pitch));
       const h = raycast(map, eye, viewForward(yaw, pitch), TUNING.ropeRange);
-      if (h && valid(h.point, h.t)) return h.point;
+      if (h && valid(h)) return h.point;
     }
   }
   if (assist === 'near') return null;
@@ -383,7 +770,7 @@ export function findAnchor(p: Player, map: GameMap, assist: WebAssist): V3 | nul
     for (const pitch of [0.5, 0.75, 1.0, 1.25]) {
       const dir = viewForward(p.yaw + yawOffset, pitch);
       const h = raycast(map, eye, dir, TUNING.ropeRange);
-      if (!h || h.t < 5 || h.point.y < eye.y + 3) continue;
+      if (!h || h.box.kind === 'bound' || h.t < 5 || h.point.y < eye.y + 3) continue;
       // Favour points ahead of the player at a comfortable rope length.
       const score = -Math.abs(yawOffset) * 14 - Math.abs(h.t - 24) * 0.5 - Math.abs(pitch - 0.8) * 8;
       if (score > bestScore) {
@@ -396,7 +783,7 @@ export function findAnchor(p: Player, map: GameMap, assist: WebAssist): V3 | nul
 }
 
 function fire(p: Player, target: Dummy | null, snare: boolean, events: GameEvent[]): void {
-  const origin = eyePosition(p);
+  const origin = aimPoint(p);
   let dir = viewForward(p.yaw, p.pitch);
   if (target) {
     const c = dummyCenter(target);
@@ -471,8 +858,9 @@ function turnTowardLook(p: Player, dt: number): void {
 function stepAirVelocity(p: Player, wish: V3, dt: number): void {
   const T = TUNING;
   const before = horizontalSpeed(p);
-  p.vel.x += wish.x * T.airAccel * dt;
-  p.vel.z += wish.z * T.airAccel * dt;
+  const control = p.stunT > 0 ? T.stunAirControl : 1;
+  p.vel.x += wish.x * T.airAccel * control * dt;
+  p.vel.z += wish.z * T.airAccel * control * dt;
   // Air control can steer, but it can never add speed above the run speed.
   const limit = Math.max(before - T.airDrag * dt, T.runSpeed);
   const after = horizontalSpeed(p);
@@ -483,12 +871,12 @@ function stepAirVelocity(p: Player, wish: V3, dt: number): void {
   p.vel.y -= T.gravity * (p.vel.y < 0 ? T.fallGravityScale : 1) * dt;
 }
 
-function enterAir(p: Player): void {
+export function enterAir(p: Player): void {
   p.mode = 'air';
   p.anchor = null;
 }
 
-function handPosition(p: Player): V3 {
+export function handPosition(p: Player): V3 {
   return { x: p.pos.x, y: p.pos.y + TUNING.ropeHandHeight, z: p.pos.z };
 }
 
@@ -542,8 +930,28 @@ function stepSwingVelocity(p: Player, wish: V3, dt: number): void {
   p.ropeLen = Math.max(T.ropeMin, Math.min(p.ropeLen, dist) - T.reelSpeed * dt);
 }
 
-function releaseSwing(p: Player): void {
+/**
+ * Letting go of the web. At the top of the arc, past the web point and still rising
+ * a little, is the sweet spot: an extra push and some focus.
+ */
+export function releaseSwing(p: Player, events?: GameEvent[]): void {
   const s = totalSpeed(p);
+  const a = p.anchor;
+  if (a && s > 12) {
+    const hand = handPosition(p);
+    const past = (hand.x - a.x) * p.vel.x + (hand.z - a.z) * p.vel.z > 0;
+    const top = p.vel.y > -1.5 && p.vel.y < 6 && hand.y < a.y;
+    if (past && top) {
+      const k = (s + MOVES.apexBoost) / s;
+      p.vel.x *= k;
+      p.vel.y = p.vel.y * k + MOVES.apexLift;
+      p.vel.z *= k;
+      p.focus = Math.min(MOVES.focusMax, p.focus + 0.15);
+      events?.push({ type: 'perfect', what: 'release' });
+      enterAir(p);
+      return;
+    }
+  }
   if (s > 8) {
     const k = (s + TUNING.swingReleaseBoost) / s;
     p.vel.x *= k;
@@ -613,7 +1021,7 @@ function clampSpeed(p: Player): void {
     p.vel.x *= T.maxSpeed / s;
     p.vel.z *= T.maxSpeed / s;
   }
-  p.vel.y = Math.max(-T.maxFallSpeed, Math.min(T.maxSpeed, p.vel.y));
+  p.vel.y = Math.max(-T.maxFallSpeed, Math.min(T.maxRiseSpeed, p.vel.y));
 }
 
 function tick(t: number, dt: number): number {
@@ -624,10 +1032,60 @@ function tick(t: number, dt: number): number {
 export function snarePlayer(p: Player): void {
   p.snareT = TUNING.snareTime;
   p.sliding = false;
-  if (p.mode === 'swing' || p.mode === 'dash') enterAir(p);
+  p.zipTarget = null;
+  p.webLine = null;
+  p.webPending = false;
+  if (p.mode !== 'ground' && p.mode !== 'air' && p.mode !== 'wall') enterAir(p);
+}
+
+/** What the body shows to everyone: a move in progress wins over the plain mode. */
+export function poseOf(p: Player): PoseName {
+  if (p.stunT > 0) return 'stun';
+  if (p.act) return p.act;
+  return p.sliding ? 'slide' : p.mode;
+}
+
+/** Where this player's web runs, for drawing it: the swing point, or any other line. */
+export function webLineOf(p: Player): V3 | null {
+  return p.mode === 'swing' ? p.anchor : p.webLine;
+}
+
+/** Another player's hit, reported by the host. */
+export function knockPlayer(p: Player, map: GameMap, knock: V3, stun: number, pin: boolean): void {
+  applyKnock(p, map, knock, stun, pin);
+}
+
+/** Launches a player who is on a pad. Someone on a web is passing over it, not stepping on it. */
+function checkJumpPads(p: Player, map: GameMap, events: GameEvent[]): void {
+  const T = TUNING;
+  if (p.padCdT > 0 || p.mode === 'swing' || p.vel.y > 0) return;
+
+  map.jumpPads.forEach((pad, index) => {
+    const above = p.pos.y - pad.y;
+    if (above < -0.1 || above > T.padReach) return;
+    if (Math.hypot(p.pos.x - pad.x, p.pos.z - pad.z) > JUMP_PAD_RADIUS) return;
+
+    p.vel.y = T.padLaunchSpeed;
+    p.mode = 'air';
+    p.sliding = false;
+    p.coyoteT = 0;
+    p.jumpBufT = 0;
+    p.padCdT = T.padCooldown;
+    events.push({ type: 'jumpPad', index });
+  });
 }
 
 // ---------------------------------------------------------------- main step
+
+export interface StepExtras {
+  /** Someone is about to land a hit. A dodge now is a perfect one. */
+  threatened?: boolean;
+  /** Loose crates the web can fetch. */
+  crates?: CrateSpot[];
+  online?: boolean;
+}
+
+const NO_WISH: V3 = { x: 0, y: 0, z: 0 };
 
 export function stepPlayer(
   p: Player,
@@ -636,12 +1094,17 @@ export function stepPlayer(
   dummies: Dummy[],
   dt: number,
   events: GameEvent[],
+  extras: StepExtras = {},
 ): void {
   const T = TUNING;
+  const ctx: MoveContext = { map, dummies, events, threatened: extras.threatened ?? false, crates: extras.crates ?? [], online: extras.online ?? false };
 
   p.yaw = input.yaw;
   p.pitch = input.pitch;
+  p.aimFrom = input.aimFrom;
   p.impactSpeed = 0;
+  p.slamSpeed = 0;
+  p.stunT = tick(p.stunT, dt);
   p.coyoteT = tick(p.coyoteT, dt);
   p.jumpBufT = tick(p.jumpBufT, dt);
   p.slideCdT = tick(p.slideCdT, dt);
@@ -649,15 +1112,23 @@ export function stepPlayer(
   p.wallCdT = tick(p.wallCdT, dt);
   p.shotCdT = tick(p.shotCdT, dt);
   p.snareT = tick(p.snareT, dt);
+  p.padCdT = tick(p.padCdT, dt);
   p.snareCdT = tick(p.snareCdT, dt);
-  if (input.jump) p.jumpBufT = T.jumpBuffer;
+  p.perchT = tick(p.perchT, dt);
+  stepMoveTimers(p, dt);
+  if (p.stunT > 0) p.jumpBufT = 0;
+  else if (input.jump) p.jumpBufT = T.jumpBuffer;
   p.swingLatchT = input.swing ? tick(p.swingLatchT, dt) : 0;
+  const slidePressed = input.slide && !p.slideHeld;
+  p.slideHeld = input.slide;
 
   if (p.snareT > 0) {
     // Frozen in place, even in mid-air. The camera can still look around.
     p.vel = { x: 0, y: 0, z: 0 };
     p.anchorPreview = null;
     p.targetPreview = null;
+    p.perch = null;
+    p.webPending = false;
     return;
   }
 
@@ -665,22 +1136,33 @@ export function stepPlayer(
 
   p.anchorPreview = p.mode === 'swing' ? p.anchor : findAnchor(p, map, input.webAssist);
   const target = input.aimAssist
-    ? (findAimTarget(eyePosition(p), viewForward(p.yaw, p.pitch), map, dummies, AIM.magnetRadius * input.aimScale)?.dummy ?? null)
+    ? (findAimTarget(aimPoint(p), viewForward(p.yaw, p.pitch), map, dummies, AIM.magnetRadius * input.aimScale)?.dummy ?? null)
     : null;
   p.targetPreview = target ? target.id : null;
+  p.perch = target ? null : findPerch(p, map);
 
-  // --- actions that change mode
+  // --- fighting and the web
 
-  if (input.shoot && p.shotCdT === 0) {
+  const canAttack = p.stunT === 0 && p.mode !== 'strike' && p.mode !== 'pound';
+  if (!canAttack) p.attackBufT = 0;
+  const attack = input.shoot || (p.attackBufT > 0 && p.attackCdT === 0);
+  const punched = canAttack && attack && tryMelee(p, ctx, target);
+  if (punched || (canAttack && input.shoot)) p.webPending = false;
+  if (canAttack && input.shoot && !punched && p.shotCdT === 0) {
     fire(p, target, false, events);
     p.shotCdT = T.shotCooldown;
   }
-  if (input.snare && p.snareCdT === 0) {
+  stepAttackHold(p, input, ctx, dt);
+
+  if (p.stunT === 0 && input.snare && !(target === null && tryCrate(p, ctx)) && p.snareCdT === 0) {
     fire(p, target, true, events);
     p.snareCdT = T.snareCooldown;
   }
 
-  if (input.dash && p.dashCdT === 0) {
+  if (input.web && p.mode !== 'strike' && p.mode !== 'pound') pressWeb(p, ctx, target);
+  if (input.focus) pressFocus(p, ctx, target);
+
+  if (input.dash && p.dashCdT === 0 && p.stunT === 0 && p.mode !== 'strike' && p.mode !== 'pound') {
     const flatLen = Math.hypot(wish.x, wish.z);
     const f = viewForward(p.yaw, 0);
     const dirX = flatLen > 0.1 ? wish.x / flatLen : f.x;
@@ -694,48 +1176,67 @@ export function stepPlayer(
     p.dashCdT = T.dashCooldown;
     p.sliding = false;
     p.anchor = null;
+    p.zipTarget = null;
+    p.webLine = null;
+    p.webPending = false;
+    p.hangIn = null;
+    startDodge(p, ctx, wish);
   }
 
-  if (input.swing && p.swingLatchT === 0 && p.mode !== 'swing' && p.mode !== 'dash' && p.anchorPreview) {
+  const canStartSwing = p.mode !== 'swing' && p.mode !== 'dash' && p.mode !== 'strike' && p.mode !== 'pound';
+  if (input.swing && p.swingLatchT === 0 && p.stunT === 0 && canStartSwing && p.anchorPreview) {
+    p.webPending = false;
+    p.zipTarget = null;
+    p.hangIn = null;
     startSwing(p, p.anchorPreview);
+    p.webLine = null;
   }
 
-  if (p.mode === 'swing' && !input.swing) releaseSwing(p);
+  if (p.mode === 'swing' && !input.swing) releaseSwing(p, events);
 
   // --- jump
 
-  const canGroundJump = p.mode === 'ground' || (p.mode === 'air' && p.coyoteT > 0);
-  if (p.jumpBufT > 0 && canGroundJump) {
-    p.vel.y = T.jumpSpeed;
-    p.jumpBufT = 0;
-    p.coyoteT = 0;
-    p.sliding = false;
-    p.mode = 'air';
-    events.push({ type: 'jump' });
-  } else if (p.jumpBufT > 0 && p.mode === 'wall') {
-    // Jump where the camera looks, but never back into the wall.
-    const along = Math.max(horizontalSpeed(p), T.runSpeed);
-    const look = viewForward(p.yaw, 0);
-    const into = Math.min(0, look.x * p.wallNormal.x + look.z * p.wallNormal.z);
-    const lx = look.x - p.wallNormal.x * into;
-    const lz = look.z - p.wallNormal.z * into;
-    const len = Math.hypot(lx, lz);
-    const dirX = len > 0.2 ? lx / len : p.wallTangent.x;
-    const dirZ = len > 0.2 ? lz / len : p.wallTangent.z;
-    p.vel.x = dirX * along + p.wallNormal.x * T.wallJumpOut;
-    p.vel.z = dirZ * along + p.wallNormal.z * T.wallJumpOut;
-    p.vel.y = T.wallJumpUp;
-    p.jumpBufT = 0;
-    p.wallCdT = T.wallCooldown;
-    p.mode = 'air';
-    events.push({ type: 'wallJump' });
+  if (!tryJumpMoves(p, ctx)) {
+    const canGroundJump = p.mode === 'ground' || (p.mode === 'air' && p.coyoteT > 0);
+    if (p.jumpBufT > 0 && canGroundJump) {
+      p.vel.y = T.jumpSpeed;
+      p.jumpBufT = 0;
+      p.coyoteT = 0;
+      p.sliding = false;
+      p.mode = 'air';
+      events.push({ type: 'jump' });
+    } else if (p.jumpBufT > 0 && p.mode === 'wall') {
+      // Jump where the camera looks, but never back into the wall. Looking up makes
+      // it a leap up the wall rather than away from it.
+      const along = Math.max(horizontalSpeed(p), T.runSpeed);
+      const look = viewForward(p.yaw, 0);
+      const into = Math.min(0, look.x * p.wallNormal.x + look.z * p.wallNormal.z);
+      const lx = look.x - p.wallNormal.x * into;
+      const lz = look.z - p.wallNormal.z * into;
+      const len = Math.hypot(lx, lz);
+      const dirX = len > 0.2 ? lx / len : 0;
+      const dirZ = len > 0.2 ? lz / len : 0;
+      const upward = Math.max(0, Math.sin(p.pitch));
+      const out = T.wallJumpOut * (1 - upward * 0.75);
+      p.vel.x = dirX * along + p.wallNormal.x * out;
+      p.vel.z = dirZ * along + p.wallNormal.z * out;
+      p.vel.y = T.wallJumpUp * (1 + upward * 0.35);
+      p.jumpBufT = 0;
+      p.wallCdT = T.wallCooldown;
+      p.mode = 'air';
+      events.push({ type: 'wallJump' });
+    }
   }
 
-  // --- slide
+  // --- slam down, crouch-charge, slide
+
+  if (slidePressed && (p.mode === 'air' || p.mode === 'dash') && startPound(p, map)) p.webPending = false;
+  stepCharge(p, input, dt);
 
   const speedNow = horizontalSpeed(p);
   if (input.slide && p.mode === 'ground' && !p.sliding && speedNow >= T.slideMinSpeed) {
     p.sliding = true;
+    p.charge = 0;
     if (p.slideCdT === 0) {
       const k = (speedNow + T.slideBoost) / speedNow;
       p.vel.x *= k;
@@ -751,11 +1252,14 @@ export function stepPlayer(
   }
   p.height = p.sliding ? T.slideHeight : T.standHeight;
 
+  // Resolve a pending web only after movement actions have had a chance to cancel it.
+  stepWebHold(p, input, ctx, dt);
+
   // --- integrate velocity per mode
 
   switch (p.mode) {
     case 'ground':
-      stepGroundVelocity(p, wish, dt);
+      stepGroundVelocity(p, p.charge > 0 ? NO_WISH : wish, dt);
       p.vel.y -= T.gravity * dt;
       break;
 
@@ -770,19 +1274,36 @@ export function stepPlayer(
       if (p.dashT <= 0) enterAir(p);
       break;
 
-    case 'wall': {
-      p.wallT += dt;
-      const along = p.vel.x * p.wallTangent.x + p.vel.z * p.wallTangent.z;
-      const next = Math.min(T.wallSpeedCap, along + T.wallAccel * dt);
-      const keep = Math.max(next, along);
-      p.vel.x = p.wallTangent.x * keep;
-      p.vel.z = p.wallTangent.z * keep;
-      p.vel.y -= T.gravity * T.wallGravityScale * dt;
+    case 'wall':
+      if (wish.x * p.wallNormal.x + wish.z * p.wallNormal.z > T.wallLetGo) {
+        p.vel.x += p.wallNormal.x * T.wallPushOff;
+        p.vel.z += p.wallNormal.z * T.wallPushOff;
+        p.wallCdT = T.wallCooldown;
+        enterAir(p);
+        stepAirVelocity(p, wish, dt);
+      } else {
+        stepWallVelocity(p, input, dt);
+      }
       break;
-    }
 
     case 'swing':
       stepSwingVelocity(p, wish, dt);
+      break;
+
+    case 'zip':
+      stepZip(p, dt);
+      break;
+
+    case 'strike':
+      stepStrike(p, ctx, dt);
+      break;
+
+    case 'pound':
+      p.vel = { x: 0, y: -MOVES.poundSpeed, z: 0 };
+      break;
+
+    case 'hang':
+      stepHang(p, input, wishDirection(p.yaw, input.moveX, 0), map, dt);
       break;
   }
 
@@ -798,7 +1319,31 @@ export function stepPlayer(
     const dist = applyRope(p, map, dt);
     if (dist < T.ropeDetach || (dist < T.ropeFlingDistance && isFlyingPast(p, dist))) {
       p.swingLatchT = T.ropeReattach;
-      releaseSwing(p);
+      releaseSwing(p, events);
+    }
+  }
+
+  if (p.mode === 'hang') {
+    holdLine(p, (offset) => {
+      const saved = { ...p.vel };
+      p.vel = { x: offset.x / dt, y: offset.y / dt, z: offset.z / dt };
+      moveAndCollide(p, map, dt, false);
+      p.vel = saved;
+    });
+  }
+
+  if (p.mode === 'zip' && p.zipTarget) {
+    const t = p.zipTarget;
+    const flat = Math.hypot(t.x - p.pos.x, t.z - p.pos.z);
+    if (p.pos.y >= t.y - 0.1 && flat < MOVES.pointZipArrive) {
+      // Step onto the ledge itself, not the air just short of it.
+      if (spaceIsFree(map, p, t.x, t.y, t.z, T.standHeight)) p.pos = { ...t };
+      else p.pos.y = Math.max(p.pos.y, t.y);
+      p.mode = 'ground';
+      p.vel = { x: 0, y: 0, z: 0 };
+      p.zipTarget = null;
+      p.webLine = null;
+      p.perchT = MOVES.pointLaunchWindow;
     }
   }
 
@@ -818,13 +1363,35 @@ export function stepPlayer(
     }
   }
 
+  // Smashing into a wall mid-swing, mid-dash or mid-air is too hard to hold.
+  const flying = p.mode === 'air' || p.mode === 'swing' || p.mode === 'dash';
+  if (moved.normal && flying && p.slamSpeed >= T.wallSlamSpeed) {
+    slamWall(p, moved.normal, p.slamSpeed);
+  }
+  for (const speed of slams.splice(0)) events.push({ type: 'slam', speed });
+
+  checkJumpPads(p, map, events);
+
   // --- resolve ground and wall state
 
   if (moved.landed) {
-    if (p.mode === 'air' || p.mode === 'dash' || p.mode === 'wall') {
+    if (p.mode === 'pound') {
+      landPound(p, ctx);
+      events.push({ type: 'land', speed: fallSpeed });
+    } else if (
+      p.mode === 'air' ||
+      p.mode === 'dash' ||
+      p.mode === 'wall' ||
+      p.mode === 'zip' ||
+      // Still standing on the roof a line hangs over isn't the end of the line.
+      (p.mode === 'hang' && p.anchor !== null && p.pos.y < p.anchor.y - 1.5)
+    ) {
       if (fallSpeed > 12) events.push({ type: 'land', speed: fallSpeed });
+      if (p.mode === 'air' || p.mode === 'dash') hardLanding(p, fallSpeed);
       p.mode = 'ground';
-      p.lastWall = null;
+      p.zipTarget = null;
+      p.webLine = null;
+      p.hangIn = null;
     }
     if (p.mode === 'ground') p.coyoteT = T.coyoteTime;
   } else if (wasGround && p.mode === 'ground') {
@@ -832,32 +1399,13 @@ export function stepPlayer(
     p.coyoteT = T.coyoteTime;
   }
 
-  if (p.mode === 'air' && p.wallCdT === 0 && p.pos.y > 0.8) {
-    const wall = findRunWall(p, map);
-    if (wall && wall.box !== p.lastWall) {
-      const tx = -wall.normal.z;
-      const tz = wall.normal.x;
-      const along = p.vel.x * tx + p.vel.z * tz;
-      // Momentum lost to the impact is carried into the run, so a slanted
-      // approach doesn't punish the player for touching the wall.
-      const carried = Math.max(Math.abs(along), Math.abs(along) > 2 ? p.impactSpeed * 0.85 : 0);
-      if (carried >= T.wallMinSpeed && p.vel.y > -18) {
-        const sign = along >= 0 ? 1 : -1;
-        p.mode = 'wall';
-        p.wallT = 0;
-        p.wallNormal = wall.normal;
-        p.wallTangent = { x: tx * sign, y: 0, z: tz * sign };
-        p.lastWall = wall.box;
-        p.vel.x = p.wallTangent.x * carried;
-        p.vel.z = p.wallTangent.z * carried;
-        p.vel.y = Math.max(p.vel.y, 1.5);
-      }
-    }
+  const lookingUpAWall = p.mode === 'ground' && moved.blocked && input.moveZ > 0.2 && p.pitch > T.wallLookUp;
+  if (p.wallCdT === 0 && p.stunT === 0 && ((p.mode === 'air' && p.pos.y > 0.8) || lookingUpAWall)) {
+    tryGrabWall(p, map, wish);
+    for (const speed of slams.splice(0)) events.push({ type: 'slam', speed });
   } else if (p.mode === 'wall') {
-    const wall = findRunWall(p, map);
-    if (!wall || p.wallT > T.wallMaxTime) {
-      p.wallCdT = T.wallCooldown;
-      enterAir(p);
-    }
+    const wall = findClimbWall(p, map, wish);
+    if (wall) p.wallNormal = wall.normal;
+    else leaveWall(p, input);
   }
 }

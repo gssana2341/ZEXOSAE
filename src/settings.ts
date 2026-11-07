@@ -11,10 +11,13 @@ export type Action =
   | 'slide'
   | 'shoot'
   | 'snare'
+  | 'web'
+  | 'focus'
   | 'reset'
-  | 'scores';
+  | 'scores'
+  | 'view';
 
-export type ControlId = 'move' | 'attack' | 'dash' | 'snare' | 'pause' | 'scores';
+export type ControlId = 'move' | 'attack' | 'dash' | 'snare' | 'web' | 'focus' | 'pause' | 'scores' | 'view';
 
 export interface ControlLayout {
   /** Centre of the control as a share of the screen. Unset keeps its default place. */
@@ -32,6 +35,7 @@ export interface Settings {
   aimAssist: boolean;
   reduceMotion: boolean;
   swapButtons: boolean;
+  thirdPerson: boolean;
   touchLayout: Partial<Record<ControlId, ControlLayout>>;
   keys: Record<Action, string>;
   /** Only present in saved settings. */
@@ -46,11 +50,14 @@ export const ACTION_LABELS: Record<Action, string> = {
   jump: 'กระโดด',
   swing: 'โหนใย (กดค้าง)',
   dash: 'พุ่งหลบ',
-  slide: 'สไลด์ (กดค้าง)',
-  shoot: 'ยิงใย',
-  snare: 'ใยรัด (แช่แข็ง)',
+  slide: 'สไลด์ / ย่อชาร์จกระโดด / ทุบพื้นกลางอากาศ',
+  shoot: 'ต่อยระยะใกล้ / ยิงใย (ค้างเพื่อเสยหรือเตะ)',
+  snare: 'ใยรัด / ดึงกล่องมาปา',
+  web: 'ใยพุ่ง: แตะพุ่งเตะ ค้างกระชาก / ดีดขึ้นขอบ / แขวน',
+  focus: 'โฟกัส: ฟื้นเลือด / ท่าปิดฉาก / ท่าเท่กลางอากาศ',
   reset: 'กลับจุดเริ่ม',
   scores: 'ดูคะแนน (กดค้าง)',
+  view: 'สลับมุมกล้อง',
 };
 
 /** True when a finger, not a mouse, is the main way to aim. */
@@ -68,6 +75,7 @@ function defaults(): Settings {
     aimAssist: true,
     reduceMotion: false,
     swapButtons: false,
+    thirdPerson: false,
     touchLayout: {},
     keys: {
       forward: 'KeyW',
@@ -80,8 +88,11 @@ function defaults(): Settings {
       slide: 'KeyC',
       shoot: 'Mouse0',
       snare: 'KeyQ',
+      web: 'KeyE',
+      focus: 'KeyF',
       reset: 'KeyR',
       scores: 'Tab',
+      view: 'KeyV',
     },
   };
 }

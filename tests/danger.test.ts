@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { createDanger, DANGER, stepDanger } from '../src/sim/danger';
-import { createArena, type V3 } from '../src/sim/map';
+import type { V3 } from '../src/sim/map';
 import { createPlayer, emptyInput, TUNING, type Dummy } from '../src/sim/player';
 import { TICK, World } from '../src/sim/world';
+import { createTestArena } from './test-map';
 
-const map = createArena();
+const map = createTestArena();
 
 /** An enemy at `pos`, aiming straight at `at`. */
 function shooter(pos: V3, at: V3, id = 1): Dummy {
@@ -124,7 +125,7 @@ describe('when it stays quiet', () => {
 
 describe('practice mode', () => {
   it('dummies take turns aiming, so the warning can be practised', () => {
-    const w = new World();
+    const w = new World(null, createTestArena());
     w.player.pos = { x: 0, y: 0.05, z: 0 };
     let peak = 0;
     for (let i = 0; i < 8 / TICK; i += 1) {
@@ -135,7 +136,7 @@ describe('practice mode', () => {
   });
 
   it('a new life starts with no warning', () => {
-    const w = new World();
+    const w = new World(null, createTestArena());
     w.danger.top = 1;
     w.respawnAt({ x: 0, y: 1, z: 0 }, 0);
     expect(w.danger.top).toBe(0);

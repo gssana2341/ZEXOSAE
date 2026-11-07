@@ -25,11 +25,11 @@ describe('touch buttons', () => {
         classList: { add() {}, remove() {} },
         setPointerCapture() {},
       }) as unknown as HTMLElement;
-    const [surface, move, attack, dash, snare] = [button(), button(), button(), button(), button()];
+    const [surface, move, attack, dash, snare, web, focus] = Array.from({ length: 7 }, button);
     const input = new InputManager(settings, { classList: { remove() {} } } as unknown as HTMLElement);
-    input.bindTouch(surface, move, attack, dash, snare);
+    input.bindTouch(surface, move, attack, dash, snare, web, focus);
     input.enabled = true;
-    return { input, attack, dash, snare };
+    return { input, move, attack, dash, snare, web, focus };
   }
   const tap = (el: HTMLElement) => {
     for (const type of ['pointerdown', 'pointerup']) {
@@ -38,7 +38,48 @@ describe('touch buttons', () => {
       el.dispatchEvent(event);
     }
   };
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('taps to jump in the air and holds to swing without also jumping', () => {
+    vi.useFakeTimers();
+    const { input, move } = setup();
+    input.setContext(true, false);
+    tap(move);
+    expect(input.sample()).toMatchObject({ jump: true, swing: false });
+
+    const down = new Event('pointerdown', { cancelable: true });
+    Object.defineProperty(down, 'pointerId', { value: 1 });
+    move.dispatchEvent(down);
+    expect(input.sample()).toMatchObject({ jump: false, swing: false });
+    vi.advanceTimersByTime(150);
+    expect(input.sample()).toMatchObject({ jump: false, swing: true });
+    const up = new Event('pointerup');
+    Object.defineProperty(up, 'pointerId', { value: 1 });
+    move.dispatchEvent(up);
+    expect(input.sample()).toMatchObject({ jump: false, swing: false });
+  });
+
+  it('does not turn a cancelled or cleared touch into a jump', () => {
+    vi.useFakeTimers();
+    const { input, move } = setup();
+    input.setContext(true, false);
+    const pointer = (type: string) => {
+      const event = new Event(type, { cancelable: true });
+      Object.defineProperty(event, 'pointerId', { value: 1 });
+      move.dispatchEvent(event);
+    };
+    pointer('pointerdown');
+    pointer('pointercancel');
+    expect(input.sample().jump).toBe(false);
+    pointer('pointerdown');
+    input.clear();
+    vi.advanceTimersByTime(200);
+    pointer('pointerup');
+    expect(input.sample()).toMatchObject({ jump: false, swing: false });
+  });
 
   it('each skill has its own button', () => {
     const { input, attack, dash, snare } = setup();
@@ -59,6 +100,27 @@ describe('touch buttons', () => {
     Object.defineProperty(down, 'pointerId', { value: 1 });
     attack.dispatchEvent(down);
     expect(input.sample().shoot).toBe(true);
+  });
+
+  it('tells a held attack or web from a tap', () => {
+    const { input, attack, web, focus } = setup();
+    const press = (el: HTMLElement, type: string) => {
+      const event = new Event(type, { cancelable: true });
+      Object.defineProperty(event, 'pointerId', { value: 1 });
+      el.dispatchEvent(event);
+    };
+    press(attack, 'pointerdown');
+    press(web, 'pointerdown');
+    let s = input.sample();
+    expect([s.shoot, s.shootHeld, s.web, s.webHeld]).toEqual([true, true, true, true]);
+    s = input.sample();
+    expect([s.shoot, s.shootHeld, s.web, s.webHeld]).toEqual([false, true, false, true]);
+    press(attack, 'pointerup');
+    press(web, 'pointerup');
+    s = input.sample();
+    expect([s.shootHeld, s.webHeld]).toEqual([false, false]);
+    tap(focus);
+    expect(input.sample().focus).toBe(true);
   });
 
   it('ignores buttons while the game is paused', () => {

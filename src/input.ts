@@ -1,9 +1,12 @@
 // Turns keyboard, mouse and touch into the same TickInput the simulation reads.
 
+import type { V3 } from './sim/map';
 import { emptyInput, type TickInput } from './sim/player';
 import { isCoarsePointer, type Action, type Settings } from './settings';
 
 const MOUSE_LOOK = 0.0022;
+/** One mouse event moving further than this, out of nowhere, is a glitch rather than a flick. */
+const MOUSE_SPIKE = 180;
 const TOUCH_LOOK = 0.0048;
 const PITCH_LIMIT = 1.5;
 /** Thumbs can't aim as finely as a mouse, so touch gets wider aim help. */
@@ -30,6 +33,8 @@ export class InputManager {
   yaw = 0;
   pitch = 0;
   enabled = false;
+  /** Set each frame to the camera position in third person, so aim follows the crosshair. */
+  aimFrom: V3 | null = null;
   readonly aimScale = isCoarsePointer() ? TOUCH_AIM_SCALE : 1;
 
   private held = new Set<string>();
@@ -43,7 +48,13 @@ export class InputManager {
   private slideUntil = 0;
 
   private touchSwing = false;
+  private touchAttack = false;
+  private touchWeb = false;
   private swingTimer = 0;
+  private airMoveTap = false;
+
+  /** How far the mouse has been moving per event lately. */
+  private recentMouse = 0;
 
   private airborne = false;
   private onWall = false;
@@ -65,6 +76,7 @@ export class InputManager {
     window.addEventListener('mouseup', (e) => this.release(`Mouse${e.button}`));
     window.addEventListener('mousemove', (e) => {
       if (!this.enabled || !document.pointerLockElement) return;
+      if (this.mouseGlitch(e.movementX, e.movementY)) return;
       this.look(e.movementX * MOUSE_LOOK * settings.mouseSens, e.movementY * MOUSE_LOOK * settings.mouseSens);
     });
     window.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -83,12 +95,21 @@ export class InputManager {
     this.stick = null;
     this.lookId = null;
     this.touchSwing = false;
+    this.touchAttack = false;
+    this.touchWeb = false;
+    this.airMoveTap = false;
+    this.flick = null;
+    this.slideUntil = 0;
     window.clearTimeout(this.swingTimer);
     this.stickView.classList.remove('on');
   }
 
   scoresHeld(): boolean {
     return this.held.has(this.settings.keys.scores);
+  }
+
+  consumeView(): boolean {
+    return this.pressed.delete('view');
   }
 
   consumeReset(): boolean {
@@ -125,11 +146,28 @@ export class InputManager {
     input.shoot = this.pressed.delete('shoot');
     input.snare = this.pressed.delete('snare');
     input.swing = down('swing') || this.touchSwing;
+    input.web = this.pressed.delete('web');
+    input.focus = this.pressed.delete('focus');
+    input.shootHeld = down('shoot') || this.touchAttack;
+    input.webHeld = down('web') || this.touchWeb;
     input.slide = down('slide') || performance.now() < this.slideUntil;
     input.aimAssist = this.settings.aimAssist;
     input.aimScale = this.aimScale;
+    input.aimFrom = this.aimFrom;
     input.webAssist = !this.settings.aimAssist ? 'off' : isCoarsePointer() ? 'wide' : 'near';
     return input;
+  }
+
+  /**
+   * Under pointer lock, browsers on Windows now and then report one huge mouse jump that
+   * the hand never made, which spins the view away. A real flick builds up over a few
+   * events, so a lone jump far beyond the last few is dropped.
+   */
+  private mouseGlitch(dx: number, dy: number): boolean {
+    const size = Math.hypot(dx, dy);
+    const glitch = size > MOUSE_SPIKE && size > this.recentMouse * 6 + 40;
+    if (!glitch) this.recentMouse = this.recentMouse * 0.6 + size * 0.4;
+    return glitch;
   }
 
   private look(dx: number, dy: number): void {
@@ -158,6 +196,8 @@ export class InputManager {
     attackButton: HTMLElement,
     dashButton: HTMLElement,
     snareButton: HTMLElement,
+    webButton: HTMLElement,
+    focusButton: HTMLElement,
   ): void {
     surface.addEventListener('pointerdown', (e) => {
       if (!this.enabled) return;
@@ -211,16 +251,20 @@ export class InputManager {
       () => {
         if (!this.enabled) return;
         if (this.airborne && !this.onWall) {
-          this.touchSwing = true;
+          // In the air, a tap buffers a jump; only a hold starts a swing.
+          this.airMoveTap = true;
         } else {
           this.pressed.add('jump');
-          this.swingTimer = window.setTimeout(() => {
-            this.touchSwing = true;
-          }, SWING_HOLD);
         }
+        this.swingTimer = window.setTimeout(() => {
+          this.airMoveTap = false;
+          this.touchSwing = true;
+        }, SWING_HOLD);
       },
-      () => {
+      (cancelled) => {
         window.clearTimeout(this.swingTimer);
+        if (this.airMoveTap && this.enabled && !cancelled) this.pressed.add('jump');
+        this.airMoveTap = false;
         this.touchSwing = false;
       },
     );
@@ -233,12 +277,25 @@ export class InputManager {
         },
         () => undefined,
       );
-    tap(attackButton, 'shoot');
+    // Held buttons: a hold means something different from a tap.
+    const hold = (el: HTMLElement, action: Action, set: (down: boolean) => void) =>
+      this.bindButton(
+        el,
+        () => {
+          if (!this.enabled) return;
+          this.pressed.add(action);
+          set(true);
+        },
+        () => set(false),
+      );
+    hold(attackButton, 'shoot', (down) => (this.touchAttack = down));
+    hold(webButton, 'web', (down) => (this.touchWeb = down));
     tap(dashButton, 'dash');
     tap(snareButton, 'snare');
+    tap(focusButton, 'focus');
   }
 
-  private bindButton(el: HTMLElement, onDown: () => void, onUp: () => void): void {
+  private bindButton(el: HTMLElement, onDown: () => void, onUp: (cancelled: boolean) => void): void {
     el.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -249,7 +306,7 @@ export class InputManager {
     const up = (e: PointerEvent) => {
       e.stopPropagation();
       el.classList.remove('down');
-      onUp();
+      onUp(e.type === 'pointercancel');
     };
     el.addEventListener('pointerup', up);
     el.addEventListener('pointercancel', up);
