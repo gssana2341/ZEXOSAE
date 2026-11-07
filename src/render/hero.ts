@@ -51,12 +51,26 @@ export async function loadHero(): Promise<HeroAsset> {
   };
 }
 
-const materials = new Map<number, THREE.Material>();
+const materials = new Map<number, THREE.MeshLambertMaterial>();
+let nightFill = 0;
+
+/** A little reflected light keeps players readable against the dark city. */
+export function setHeroNightLight(lamps: number): void {
+  nightFill = Math.max(0, (lamps - 0.35) / 0.65) * 0.2;
+  for (const material of materials.values()) material.emissiveIntensity = nightFill;
+}
 
 function materialFor(asset: HeroAsset, palette: number): THREE.Material {
   let material = materials.get(palette);
   if (!material) {
-    material = new THREE.MeshLambertMaterial({ map: asset.map, color: PALETTES[palette].suit });
+    const suit = PALETTES[palette].suit;
+    material = new THREE.MeshLambertMaterial({
+      map: asset.map,
+      color: suit,
+      emissive: suit,
+      emissiveMap: asset.map,
+      emissiveIntensity: nightFill,
+    });
     materials.set(palette, material);
   }
   return material;

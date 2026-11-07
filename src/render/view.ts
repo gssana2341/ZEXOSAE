@@ -396,7 +396,9 @@ export class GameView {
 
   /** Swaps the block characters for the animated hero before the game starts. */
   private async loadHeroes(): Promise<void> {
-    const { FirstPersonArms, HeroBody, armPoseFor, loadHero } = await import('./hero');
+    const { FirstPersonArms, HeroBody, armPoseFor, loadHero, setHeroNightLight } = await import('./hero');
+    this.lighting.lit.lamps.push(setHeroNightLight);
+    this.lighting.refresh();
     this.armPoseFor = armPoseFor;
     const asset = await loadHero();
     for (const [i, view] of [this.self, ...this.dummies].entries()) {
