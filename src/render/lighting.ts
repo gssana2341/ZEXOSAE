@@ -123,28 +123,28 @@ export const LOOKS: Record<TimeOfDay, Look> = {
     stars: 0,
   },
   night: {
-    skyLow: '#514938',
-    skyMid: '#20222c',
-    skyHigh: '#070b15',
-    fog: '#3b3835',
+    skyLow: '#332d22',
+    skyMid: '#0d1018',
+    skyHigh: '#010208',
+    fog: '#24231f',
     fogNear: 240,
     fogFar: 1150,
-    hemiSky: '#8796b6',
-    hemiGround: '#39332e',
-    hemi: 0.95,
-    sun: '#b9c9e3',
-    sunPower: 0.8,
+    hemiSky: '#73819e',
+    hemiGround: '#27241e',
+    hemi: 0.8,
+    sun: '#aebfe0',
+    sunPower: 0.6,
     sunDir: [0.45, 0.62, -0.5],
     disc: '#eef2ff',
     discSize: 17,
-    exposure: 1.08,
-    clouds: '#45413e',
-    land: '#1d2028',
-    far: '#66615a',
-    windows: 0.9,
-    glass: 1.35,
+    exposure: 0.95,
+    clouds: '#2d2b29',
+    land: '#11131a',
+    far: '#4e4b46',
+    windows: 1.1,
+    glass: 1.2,
     lamps: 1,
-    stars: 0.4,
+    stars: 0.22,
   },
 };
 
@@ -197,8 +197,8 @@ export function cycleAt(seconds: number): { from: TimeOfDay; to: TimeOfDay; k: n
 export interface Lit {
   /** Window materials: their emissive intensity is set from the look. */
   windows: THREE.MeshLambertMaterial[];
-  /** Neat rows of light on modelled buildings, drawn only after dark. */
-  panes: Array<THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>>;
+  /** Real modelled glass, lit after dark. */
+  glass: THREE.MeshLambertMaterial[];
   far: THREE.MeshLambertMaterial[];
   clouds: THREE.MeshBasicMaterial[];
   land: THREE.MeshBasicMaterial[];
@@ -208,7 +208,7 @@ export interface Lit {
 
 export class Lighting {
   readonly group = new THREE.Group();
-  readonly lit: Lit = { windows: [], panes: [], far: [], clouds: [], land: [], lamps: [] };
+  readonly lit: Lit = { windows: [], glass: [], far: [], clouds: [], land: [], lamps: [] };
   private readonly dome: THREE.Mesh;
   private readonly disc: THREE.Mesh;
   private readonly stars: THREE.Points;
@@ -309,9 +309,9 @@ export class Lighting {
     this.renderer.toneMappingExposure = look.exposure;
 
     for (const m of this.lit.windows) m.emissiveIntensity = look.windows;
-    for (const pane of this.lit.panes) {
-      pane.visible = look.glass > 0.01;
-      pane.material.opacity = Math.min(0.68, look.glass * 0.43);
+    for (const m of this.lit.glass) {
+      m.emissiveIntensity = look.glass * (m.userData.emissiveScale ?? 1);
+      if (m.userData.distant) m.color.set(look.far);
     }
     for (const m of this.lit.far) {
       m.color.set(look.far);

@@ -1,7 +1,7 @@
 // The arena is built only from axis-aligned boxes. This keeps collision cheap
 // and lets a future game server reuse this file without Three.js.
 
-import { buildCity, type Scenery } from './city';
+import { buildCity, LAMP_HEIGHT, type Scenery } from './city';
 
 export interface V3 {
   x: number;
@@ -123,6 +123,14 @@ export function createArena(): GameMap {
   // The street grid around the district: varied blocks, parks, car parks and parked cars.
   const city = buildCity();
   add(...city.boxes);
+  // The central district has its own roads, so it needs lamps as well.
+  for (const [x, z, outX, outZ] of [
+    [-34, -34, 1, 1], [34, -34, -1, 1], [-34, 34, 1, -1], [34, 34, -1, -1],
+    [-20, -34, 1, 1], [20, 34, -1, -1], [-34, 20, 1, -1], [34, -20, -1, 1],
+  ]) {
+    city.scenery.lamps.push({ x, z, outX, outZ });
+    add(block(x, z, 0.3, 0.3, 0, LAMP_HEIGHT, 'prop'));
+  }
   const outerSpawns = city.spawns;
 
   // A continuous, varied skyline forms the city edge, like the original district.

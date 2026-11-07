@@ -1,80 +1,116 @@
 import * as THREE from 'three';
-import type { Box } from '../sim/map';
-import type { FarTower } from './arena';
-import { shellFor } from './shells';
 
-/** Width and height of the repeating eight-window tile, in metres. */
-const TILE = 24;
-const OFFSET = 0.25;
-
-/** Four orderly window grids per modelled building, with roofs and corners left clear. */
-export function windowGeometry(boxes: Box[], skyline: FarTower[]): THREE.BufferGeometry {
-  const positions: number[] = [];
-  const uvs: number[] = [];
-  const indices: number[] = [];
-  const add = (minX: number, maxX: number, minZ: number, maxZ: number, base: number, top: number, seed: number) => {
-    const y0 = base + 3.2;
-    const y1 = top - 1.4;
-    if (y1 <= y0) return;
-    const left = minX + 1;
-    const right = maxX - 1;
-    const back = minZ + 1;
-    const front = maxZ - 1;
-    if (right <= left || front <= back) return;
-    const quad = (a: number[], b: number[], c: number[], d: number[], width: number, side: number) => {
-      const first = positions.length / 3;
-      positions.push(...a, ...b, ...c, ...d);
-      const u = ((seed * 5 + side * 3) % 8) / 8;
-      const v = ((seed * 3) % 8) / 8;
-      uvs.push(u, v, u + width / TILE, v, u + width / TILE, v + (y1 - y0) / TILE, u, v + (y1 - y0) / TILE);
-      indices.push(first, first + 1, first + 2, first, first + 2, first + 3);
-    };
-    quad([left, y0, maxZ + OFFSET], [right, y0, maxZ + OFFSET], [right, y1, maxZ + OFFSET], [left, y1, maxZ + OFFSET], right - left, 0);
-    quad([right, y0, minZ - OFFSET], [left, y0, minZ - OFFSET], [left, y1, minZ - OFFSET], [right, y1, minZ - OFFSET], right - left, 1);
-    quad([maxX + OFFSET, y0, front], [maxX + OFFSET, y0, back], [maxX + OFFSET, y1, back], [maxX + OFFSET, y1, front], front - back, 2);
-    quad([minX - OFFSET, y0, back], [minX - OFFSET, y0, front], [minX - OFFSET, y1, front], [minX - OFFSET, y1, back], front - back, 3);
-  };
-
-  boxes.forEach((box, i) => {
-    if (shellFor(box, i)) add(box.min.x, box.max.x, box.min.z, box.max.z, box.min.y, box.max.y, i);
-  });
-  skyline.forEach((tower, i) => add(tower.x - tower.w / 2, tower.x + tower.w / 2, tower.z - tower.w / 2, tower.z + tower.w / 2, 0, tower.h, i + boxes.length));
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
-  geometry.setIndex(indices);
-  geometry.computeBoundingSphere();
-  return geometry;
+/** The Kenney colour atlas uses this swatch for actual window glass. */
+function glassUv(uv: THREE.BufferAttribute | THREE.InterleavedBufferAttribute, index: number): boolean {
+  const u = uv.getX(index);
+  const v = uv.getY(index);
+  return u > 0.68 && u < 0.76 && v > 0.25 && v < 0.5;
 }
 
-/** A single preloaded, mipmapped texture keeps window lights stable at a distance. */
-export function cityWindowLights(boxes: Box[], skyline: FarTower[], maxAnisotropy: number): THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial> {
-  const canvas = document.createElement('canvas');
-  canvas.width = 256;
-  canvas.height = 256;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('Could not prepare the city window lights');
-  for (let row = 0; row < 8; row += 1) {
-    for (let col = 0; col < 8; col += 1) {
-      const hash = ((row * 73 + col * 37 + row * col * 19 + 29) % 101) / 101;
-      if (hash < 0.58) continue;
-      ctx.fillStyle = hash > 0.89 ? '#c9dcf2' : hash > 0.73 ? '#ffe6b4' : '#e8bd84';
-      ctx.fillRect(col * 32 + 6, row * 32 + 8, 20, 16);
-    }
+/**
+ * Moves real glass faces into a separate mesh, leaving the building frame in the
+ * original mesh. The new faces reuse the exact model positions, so no pane can
+ * float in front of a column or compete with the frame for the same pixels.
+ * Distant low-detail buildings have plain facades instead of glass; only their
+ * large vertical wall faces are selected.
+ */
+export function splitWindowFaces(source: THREE.BufferGeometry, distant = false): THREE.BufferGeometry | null {
+  const index = source.getIndex();
+  const uv = source.getAttribute('uv');
+  const position = source.getAttribute('position');
+  if (!index || !uv || !position) return null;
+
+  const kept: number[] = [];
+  const selected: number[] = [];
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const c = new THREE.Vector3();
+  const normal = new THREE.Vector3();
+  const edge = new THREE.Vector3();
+  for (let i = 0; i < index.count; i += 3) {
+    const tri = [index.getX(i), index.getX(i + 1), index.getX(i + 2)];
+    a.fromBufferAttribute(position, tri[0]);
+    b.fromBufferAttribute(position, tri[1]);
+    c.fromBufferAttribute(position, tri[2]);
+    normal.subVectors(b, a).cross(edge.subVectors(c, a));
+    const area2 = normal.length();
+    const vertical = area2 > 1e-8 && Math.abs(normal.y) < area2 * 0.15;
+    const pane = distant
+      ? vertical && area2 > 4 && tri.every((n) => uv.getX(n) > 0.42 && uv.getX(n) < 0.51 && uv.getY(n) > 0.45 && uv.getY(n) < 0.8)
+      : vertical && tri.every((n) => glassUv(uv, n));
+    (pane ? selected : kept).push(...tri);
   }
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.wrapS = THREE.RepeatWrapping;
-  texture.wrapT = THREE.RepeatWrapping;
-  texture.colorSpace = THREE.SRGBColorSpace;
-  texture.anisotropy = Math.max(1, Math.min(4, maxAnisotropy));
-  const material = new THREE.MeshBasicMaterial({
-    map: texture,
-    transparent: true,
-    opacity: 0,
-    depthWrite: false,
-    polygonOffset: true,
-    polygonOffsetFactor: -1,
-    polygonOffsetUnits: -1,
+  if (!selected.length) return null;
+
+  const out = new THREE.BufferGeometry();
+  const remap = new Map<number, number>();
+  const vertices: number[] = [];
+  const faces = selected.map((old) => {
+    let next = remap.get(old);
+    if (next === undefined) {
+      next = vertices.length;
+      vertices.push(old);
+      remap.set(old, next);
+    }
+    return next;
   });
-  return new THREE.Mesh(windowGeometry(boxes, skyline), material);
+  for (const name of Object.keys(source.attributes)) {
+    const attr = source.getAttribute(name);
+    const values = new Float32Array(vertices.length * attr.itemSize);
+    vertices.forEach((old, i) => {
+      for (let component = 0; component < attr.itemSize; component += 1) {
+        values[i * attr.itemSize + component] = attr.getComponent(old, component);
+      }
+    });
+    out.setAttribute(name, new THREE.BufferAttribute(values, attr.itemSize));
+  }
+  out.setIndex(faces);
+  source.setIndex(kept);
+  return out;
+}
+
+/** A single glass material lights only real window faces in warm, white and cool tones. */
+export function windowMaterial(atlas: THREE.Texture | null, distant = false): THREE.MeshLambertMaterial {
+  const material = new THREE.MeshLambertMaterial({
+    map: atlas,
+    vertexColors: true,
+    emissive: '#ffffff',
+    emissiveIntensity: 0,
+  });
+  // The backdrop should sit behind the playable city, not shine like a foreground wall.
+  material.userData.emissiveScale = distant ? 0.3 : 1;
+  material.userData.distant = distant;
+  material.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vWindowWorld;\nvarying vec3 vWindowNormal;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvWindowWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvWindowNormal = normalize(mat3(modelMatrix) * normal);');
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>
+varying vec3 vWindowWorld;
+varying vec3 vWindowNormal;
+float windowHash(vec3 p) { return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453); }`)
+      .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+{
+  float side = step(abs(vWindowNormal.z), abs(vWindowNormal.x));
+  float across = mix(vWindowWorld.x, vWindowWorld.z, side);
+  float depth = mix(vWindowWorld.z, vWindowWorld.x, side);
+  vec2 grid = vec2(across / ${distant ? '5.5' : '3.0'}, vWindowWorld.y / ${distant ? '5.6' : '3.2'});
+  vec2 cell = floor(grid);
+  vec2 edge = min(fract(grid), 1.0 - fract(grid));
+  vec2 aa = clamp(fwidth(grid), vec2(0.004), vec2(0.2));
+  float shape = smoothstep(0.13 - aa.x, 0.13 + aa.x, edge.x) * smoothstep(0.17 - aa.y, 0.17 + aa.y, edge.y);
+  vec3 id = vec3(cell, floor(depth / 8.0));
+  float lit = step(0.60, windowHash(id));
+  float shade = windowHash(id + vec3(31.0, 17.0, 7.0));
+  vec3 warm = vec3(1.0, 0.50, 0.14);
+  vec3 white = vec3(1.0, 0.93, 0.82);
+  vec3 blue = vec3(0.16, 0.48, 1.0);
+  vec3 tint = shade < 0.53 ? warm : (shade < 0.8 ? white : blue);
+  float distanceFade = smoothstep(${distant ? '0.16, 0.4' : '0.35, 0.85'}, max(fwidth(grid.x), fwidth(grid.y)));
+  float strength = mix(lit * shape, ${distant ? '0.06' : '0.13'}, distanceFade);
+  totalEmissiveRadiance *= strength * mix(tint, vec3(0.85, 0.78, 0.67), distanceFade);
+}`);
+  };
+  material.customProgramCacheKey = () => `city-glass-v3-${distant ? 'far' : 'near'}`;
+  return material;
 }

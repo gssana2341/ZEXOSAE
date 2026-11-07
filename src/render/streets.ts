@@ -167,15 +167,32 @@ function carLightGeometry(): THREE.BufferGeometry {
 
 /** A pool of light on the ground, for lamps and headlights. Bright in the middle, gone at the rim. */
 function glowGeometry(radius: number): THREE.BufferGeometry {
-  const g = new THREE.CircleGeometry(radius, 24).rotateX(-Math.PI / 2);
-  const position = g.getAttribute('position');
-  const colors = new Float32Array(position.count * 3);
-  for (let i = 0; i < position.count; i += 1) {
-    const r = Math.hypot(position.getX(i), position.getZ(i)) / radius;
-    const k = Math.max(0, 1 - r) ** 1.6;
-    colors.set([k, k, k], i * 3);
+  const segments = 24;
+  const rings = [0.2, 0.45, 0.7, 1];
+  const positions = [0, 0, 0];
+  const colors = [1, 1, 1];
+  const indices: number[] = [];
+  for (const r of rings) {
+    const k = (1 - r) ** 2;
+    for (let i = 0; i < segments; i += 1) {
+      const angle = i / segments * Math.PI * 2;
+      positions.push(Math.cos(angle) * r * radius, 0, -Math.sin(angle) * r * radius);
+      colors.push(k, k, k);
+    }
   }
-  g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  for (let i = 0; i < segments; i += 1) indices.push(0, 1 + i, 1 + (i + 1) % segments);
+  for (let ring = 1; ring < rings.length; ring += 1) {
+    const inner = 1 + (ring - 1) * segments;
+    const outer = 1 + ring * segments;
+    for (let i = 0; i < segments; i += 1) {
+      const next = (i + 1) % segments;
+      indices.push(inner + i, outer + i, outer + next, inner + i, outer + next, inner + next);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  g.setIndex(indices);
   return g;
 }
 
@@ -281,17 +298,18 @@ export class Streets {
     // Street lamps: posts, heads that light up, and a pool of light under each.
     const lamp = lampGeometry();
     const posts = new THREE.InstancedMesh(lamp.post, material, scenery.lamps.length);
-    this.lampHeads = new THREE.MeshBasicMaterial({ color: '#c9ccd4' });
+    this.lampHeads = new THREE.MeshBasicMaterial({ color: '#c9ccd4', toneMapped: false });
     const heads = new THREE.InstancedMesh(lamp.head, this.lampHeads, scenery.lamps.length);
     this.pools = new THREE.MeshBasicMaterial({
       vertexColors: true,
-      color: '#ffc46b',
+      color: '#ffdf9b',
       transparent: true,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
+      toneMapped: false,
       opacity: 0,
     });
-    this.lampPools = new THREE.InstancedMesh(glowGeometry(6), this.pools, scenery.lamps.length);
+    this.lampPools = new THREE.InstancedMesh(glowGeometry(8.5), this.pools, scenery.lamps.length);
     scenery.lamps.forEach((l, i) => {
       // The arm is built reaching to +x +z. Turn it to reach over the road.
       const angle = Math.atan2(l.outX, l.outZ) - Math.PI / 4;
@@ -356,6 +374,7 @@ export class Streets {
       transparent: true,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
+      toneMapped: false,
       opacity: 0,
     });
     const beam = glowGeometry(3.2).scale(0.8, 1, 1.6).translate(0, LAYER.paint + 0.05, 7);
@@ -439,8 +458,8 @@ export class Streets {
     this.lightsOn = on;
     this.lampHeads.color.set('#c9ccd4').lerp(new THREE.Color('#fff2c6'), on);
     this.carLights.color.set('#9a9a9a').lerp(new THREE.Color('#ffffff'), on);
-    this.pools.opacity = on * 0.42;
-    this.beamMaterial.opacity = on * 0.3;
+    this.pools.opacity = on * 0.78;
+    this.beamMaterial.opacity = on * 0.5;
     this.lampPools.visible = this.glow && on > 0.02;
     this.beams.visible = this.glow && on > 0.02;
   }

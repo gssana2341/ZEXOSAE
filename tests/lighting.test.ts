@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import { blendLooks, cycleAt, Lighting, LOOKS } from '../src/render/lighting';
-import { buildCity } from '../src/sim/city';
+import { buildCity, LAMP_HEIGHT } from '../src/sim/city';
+import { createArena } from '../src/sim/map';
+import { windowMaterial } from '../src/render/window-lights';
 
 describe('time of day', () => {
   it('blends smoothly from one look to the next', () => {
@@ -18,20 +20,25 @@ describe('time of day', () => {
     expect(LOOKS.night.glass).toBeGreaterThan(LOOKS.sunset.glass);
     expect(LOOKS.night.stars).toBeGreaterThan(0);
     expect(LOOKS.morning.lamps).toBe(0);
+    expect(LOOKS.night.hemi).toBeLessThan(LOOKS.day.hemi);
+    expect(LOOKS.night.sunPower).toBeLessThan(LOOKS.day.sunPower);
   });
 
-  it('shows the prepared window lights at night and hides them in the morning', () => {
+  it('lights the original window surfaces at night and turns them off in the morning', () => {
     const renderer = { toneMappingExposure: 1, shadowMap: { needsUpdate: false } } as THREE.WebGLRenderer;
     const lighting = new Lighting(new THREE.Scene(), new THREE.DirectionalLight(), new THREE.HemisphereLight(), renderer);
     lighting.set('night');
-    const panes = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial());
-    lighting.lit.panes.push(panes);
+    const glass = new THREE.MeshLambertMaterial();
+    const farGlass = windowMaterial(null, true);
+    lighting.lit.glass.push(glass, farGlass);
     lighting.refresh();
-    expect(panes.visible).toBe(true);
-    expect(panes.material.opacity).toBeGreaterThan(0);
+    expect(glass.emissiveIntensity).toBeGreaterThan(0);
+    expect(farGlass.emissiveIntensity).toBeLessThan(glass.emissiveIntensity);
+    expect(farGlass.color.getHexString()).toBe(new THREE.Color(LOOKS.night.far).getHexString());
     lighting.set('morning');
-    expect(panes.visible).toBe(false);
-    expect(panes.material.opacity).toBe(0);
+    expect(glass.emissiveIntensity).toBe(0);
+    expect(farGlass.emissiveIntensity).toBe(0);
+    expect(farGlass.color.getHexString()).toBe(new THREE.Color(LOOKS.morning.far).getHexString());
   });
 
   it('cycles through day, evening and night, holding each for a while', () => {
@@ -52,5 +59,12 @@ describe('time of day', () => {
   it('every street block has its lamps', () => {
     const city = buildCity();
     expect(city.scenery.lamps.length).toBeGreaterThan(300);
+    const map = createArena();
+    const central = map.scenery!.lamps.filter((lamp) => Math.max(Math.abs(lamp.x), Math.abs(lamp.z)) < 50);
+    expect(central.length).toBeGreaterThanOrEqual(8);
+    for (const lamp of central) {
+      expect(map.boxes.some((box) => box.kind === 'prop' && box.max.y === LAMP_HEIGHT &&
+        box.min.x < lamp.x && box.max.x > lamp.x && box.min.z < lamp.z && box.max.z > lamp.z)).toBe(true);
+    }
   });
 });

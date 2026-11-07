@@ -417,9 +417,9 @@ export class GameView {
   /** Swaps in the complete Kenney city before the loading screen closes. */
   private async loadCity(map: GameMap, placeholders: THREE.Object3D[]): Promise<void> {
     const { loadKenneyCity } = await import('./kenney');
-    const { city, far, panes, farMaterial } = await loadKenneyCity(map, this.renderer.capabilities.getMaxAnisotropy());
-    this.scene.add(city, far, panes);
-    this.lighting.lit.panes.push(panes);
+    const { city, far, glassMaterials, farMaterial } = await loadKenneyCity(map, this.renderer.capabilities.getMaxAnisotropy());
+    this.scene.add(city, far);
+    this.lighting.lit.glass.push(...glassMaterials);
     this.lighting.lit.far.push(farMaterial);
     this.lighting.refresh();
     for (const mesh of placeholders) mesh.visible = false;

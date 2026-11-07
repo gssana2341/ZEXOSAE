@@ -7,7 +7,7 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import type { GameMap } from '../sim/map';
 import { farTowers } from './arena';
 import { yieldToBrowser } from './performance';
-import { cityWindowLights } from './window-lights';
+import { splitWindowFaces, windowMaterial } from './window-lights';
 import { FAR_MODELS, shellFor, usedModels } from './shells';
 
 const BASE = '/models/kenney/';
@@ -291,8 +291,8 @@ export interface KenneyCity {
   city: THREE.Group;
   /** Distant towers. */
   far: THREE.Mesh;
-  /** Window lights stay in ordered rows on the buildings. */
-  panes: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
+  /** Window lights use the actual glass faces of the models. */
+  glassMaterials: THREE.MeshLambertMaterial[];
   farMaterial: THREE.MeshLambertMaterial;
 }
 
@@ -304,7 +304,7 @@ export async function loadKenneyCity(map: GameMap, maxAnisotropy = 1): Promise<K
   const get = (name: string) => models.get(name)!;
 
   // Each district keeps one consistent model and is culled independently.
-  const chunks = new Map<string, { x: number; z: number; parts: THREE.BufferGeometry[] }>();
+  const chunks = new Map<string, { x: number; z: number; parts: THREE.BufferGeometry[]; glass: THREE.BufferGeometry[] }>();
   const chunkSize = 112;
   let sliceStarted = performance.now();
   for (const [i, box] of map.boxes.entries()) {
@@ -315,8 +315,11 @@ export async function loadKenneyCity(map: GameMap, maxAnisotropy = 1): Promise<K
     const x = Math.floor((box.min.x + box.max.x) / 2 / chunkSize);
     const z = Math.floor((box.min.z + box.max.z) / 2 / chunkSize);
     const key = `${x},${z}`;
-    const chunk = chunks.get(key) ?? { x: (x + 0.5) * chunkSize, z: (z + 0.5) * chunkSize, parts: [] };
-    chunk.parts.push(tinted(fitted(get(name), i % 4, min, max, true), TINTS[(i * 7) % TINTS.length]).translate(-chunk.x, 0, -chunk.z));
+    const chunk = chunks.get(key) ?? { x: (x + 0.5) * chunkSize, z: (z + 0.5) * chunkSize, parts: [], glass: [] };
+    const building = tinted(fitted(get(name), i % 4, min, max, true), TINTS[(i * 7) % TINTS.length]);
+    const glass = splitWindowFaces(building);
+    if (glass) chunk.glass.push(glass.translate(-chunk.x, 0, -chunk.z));
+    chunk.parts.push(building.translate(-chunk.x, 0, -chunk.z));
     chunks.set(key, chunk);
     if (performance.now() - sliceStarted > 6) {
       await yieldToBrowser();
@@ -336,6 +339,8 @@ export async function loadKenneyCity(map: GameMap, maxAnisotropy = 1): Promise<K
     map: atlas,
     vertexColors: true,
   });
+  const glassMaterial = windowMaterial(atlas);
+  const farGlassMaterial = windowMaterial(atlas, true);
   for (const chunk of chunks.values()) {
     const walls = mergedMesh(chunk.parts, wallMaterial);
     for (const part of chunk.parts) part.dispose();
@@ -345,6 +350,15 @@ export async function loadKenneyCity(map: GameMap, maxAnisotropy = 1): Promise<K
     walls.receiveShadow = true;
     walls.position.set(chunk.x, 0, chunk.z);
     city.add(walls);
+    if (chunk.glass.length) {
+      const glass = mergedMesh(chunk.glass, glassMaterial);
+      for (const part of chunk.glass) part.dispose();
+      glass.geometry.computeBoundingSphere();
+      glass.castShadow = true;
+      glass.receiveShadow = true;
+      glass.position.set(chunk.x, 0, chunk.z);
+      city.add(glass);
+    }
     if (performance.now() - sliceStarted > 6) {
       await yieldToBrowser();
       sliceStarted = performance.now();
@@ -352,14 +366,19 @@ export async function loadKenneyCity(map: GameMap, maxAnisotropy = 1): Promise<K
   }
 
   const farParts: THREE.BufferGeometry[] = [];
+  const farGlass: THREE.BufferGeometry[] = [];
+  const white = new THREE.Color('#ffffff');
   const skyline = farTowers();
   for (const [i, tower] of skyline.entries()) {
-    farParts.push(fitted(
+    const building = tinted(fitted(
       get(FAR_MODELS[i % FAR_MODELS.length]),
       i % 4,
       new THREE.Vector3(tower.x - tower.w / 2, 0, tower.z - tower.w / 2),
       new THREE.Vector3(tower.x + tower.w / 2, tower.h, tower.z + tower.w / 2),
-    ));
+    ), white);
+    const glass = splitWindowFaces(building, true);
+    if (glass) farGlass.push(glass);
+    farParts.push(building);
     if (performance.now() - sliceStarted > 6) {
       await yieldToBrowser();
       sliceStarted = performance.now();
@@ -372,7 +391,12 @@ export async function loadKenneyCity(map: GameMap, maxAnisotropy = 1): Promise<K
   const far = mergedMesh(farParts, farMaterial);
   for (const part of farParts) part.dispose();
   far.geometry.computeBoundingSphere();
+  if (farGlass.length) {
+    const glass = mergedMesh(farGlass, farGlassMaterial);
+    for (const part of farGlass) part.dispose();
+    glass.geometry.computeBoundingSphere();
+    city.add(glass);
+  }
 
-  const panes = cityWindowLights(map.boxes, skyline, maxAnisotropy);
-  return { city, far, panes, farMaterial };
+  return { city, far, glassMaterials: [glassMaterial, farGlassMaterial], farMaterial };
 }

@@ -150,7 +150,8 @@ function windowTexture(lit: boolean): THREE.Texture {
       for (let col = 0; col < 4; col += 1) {
         const on = noise(row * 4 + col + 3) > 0.8;
         if (lit && !on) continue;
-        ctx.fillStyle = lit ? '#ffcf8a' : on ? '#e9d8b8' : '#75839e';
+        const shade = noise(row * 4 + col + 71);
+        ctx.fillStyle = lit ? (shade < 0.5 ? '#ffdb91' : shade < 0.8 ? '#fff6db' : '#b8dbff') : on ? '#e9d8b8' : '#75839e';
         ctx.fillRect(col * 64 + 12, row * 64 + 14, 40, 36);
       }
     }
