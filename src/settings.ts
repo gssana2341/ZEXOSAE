@@ -40,8 +40,6 @@ export interface Settings {
   thirdPerson: boolean;
   /** The light over the city: a fixed time of day, or drifting through them all. */
   timeOfDay: SkyChoice;
-  /** First person: the view turns over with flips and spins after letting go of a web. */
-  cameraFlips: boolean;
   /** The view trembles in a fast dive. */
   screenShake: boolean;
   /** The view widens and the third-person camera falls back with speed. */
@@ -91,7 +89,6 @@ function defaults(): Settings {
     swapButtons: false,
     thirdPerson: false,
     timeOfDay: 'sunset',
-    cameraFlips: true,
     screenShake: true,
     speedZoom: true,
     traffic: isTouchDevice() ? 'some' : 'busy',

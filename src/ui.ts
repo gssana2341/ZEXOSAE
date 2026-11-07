@@ -919,10 +919,6 @@ export class Menus {
         changed();
       }),
       el('h3', '', 'เอฟเฟกต์ (ปิดได้ถ้าเวียนหัวหรือเครื่องช้า)'),
-      toggle('กล้องตีลังกาตามตัว (มุมบุคคลที่ 1)', s.cameraFlips, (v) => {
-        s.cameraFlips = v;
-        changed();
-      }),
       toggle('จอสั่นตอนดิ่ง', s.screenShake, (v) => {
         s.screenShake = v;
         changed();

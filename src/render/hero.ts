@@ -53,10 +53,13 @@ export async function loadHero(): Promise<HeroAsset> {
 
 const materials = new Map<number, THREE.MeshLambertMaterial>();
 let nightFill = 0;
+const neonStrength = { value: 0 };
 
-/** A little reflected light keeps players readable against the dark city. */
+/** Players glow in their own neon colours after dark, fading smoothly at dusk. */
 export function setHeroNightLight(lamps: number): void {
-  nightFill = Math.max(0, (lamps - 0.35) / 0.65) * 0.2;
+  const night = Math.min(1, Math.max(0, (lamps - 0.35) / 0.65));
+  nightFill = night * 0.25;
+  neonStrength.value = night * 1.5;
   for (const material of materials.values()) material.emissiveIntensity = nightFill;
 }
 
@@ -71,6 +74,18 @@ function materialFor(asset: HeroAsset, palette: number): THREE.Material {
       emissiveMap: asset.map,
       emissiveIntensity: nightFill,
     });
+    const neonColor = new THREE.Color(PALETTES[palette].glow);
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.neonStrength = neonStrength;
+      shader.uniforms.neonColor = { value: neonColor };
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', '#include <common>\nuniform float neonStrength;\nuniform vec3 neonColor;')
+        .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+          float neonRim = pow(1.0 - abs(dot(normalize(normal), normalize(vViewPosition))), 2.0);
+          totalEmissiveRadiance += neonColor * neonStrength * (0.10 + 1.25 * neonRim);
+        `);
+    };
+    material.customProgramCacheKey = () => 'hero-night-neon-v1';
     materials.set(palette, material);
   }
   return material;

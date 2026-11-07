@@ -18,6 +18,8 @@ const OUTER = 7;
 export const CITY_FROM = 130;
 /** A landmark with an open roof looking back over the centre of the city. */
 export const OBSERVATION_TOWER = { x: BLOCK * 3, z: 0, width: 34, depth: 34, height: 210 } as const;
+/** A second skyline landmark on the opposite side of the city. */
+export const SKYLINE_TOWER = { x: -BLOCK * 3, z: 0, width: 32, depth: 32, height: 178 } as const;
 
 export const CAR_SIZE = { length: 4.4, width: 2, height: 1.5 };
 /** Street lamp posts: thin, solid, and about two storeys tall. */
@@ -165,8 +167,9 @@ export function buildCity(): CityParts {
       }
       const spawnHere = SPAWN_CELLS.some(([x, z]) => x === gx && z === gz);
       const observationTower = cx === OBSERVATION_TOWER.x && cz === OBSERVATION_TOWER.z;
+      const skylineTower = cx === SKYLINE_TOWER.x && cz === SKYLINE_TOWER.z;
       let layout = layoutFor(ring, r(1));
-      if (observationTower) layout = 'tower';
+      if (observationTower || skylineTower) layout = 'tower';
       if (spawnHere && (layout === 'park' || layout === 'parking')) layout = 'tower';
 
       const height = (lo: number, hi: number, salt: number) => Math.round(lo + (hi - lo) * r(salt));
@@ -178,6 +181,12 @@ export function buildCity(): CityParts {
           if (observationTower) {
             const tower = solid(cx, cz, OBSERVATION_TOWER.width, OBSERVATION_TOWER.depth, OBSERVATION_TOWER.height, 'glass');
             tower.landmark = 'observation';
+            built.push(tower);
+            break;
+          }
+          if (skylineTower) {
+            const tower = solid(cx, cz, SKYLINE_TOWER.width, SKYLINE_TOWER.depth, SKYLINE_TOWER.height, 'glass');
+            tower.landmark = 'skyline';
             built.push(tower);
             break;
           }

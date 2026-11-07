@@ -21,7 +21,7 @@ const MIN_WIDTH = 12;
 
 /** The model for a building, or null if it keeps its generated look. */
 export function shellFor(box: Box, index: number): string | null {
-  if (box.landmark === 'observation') return null;
+  if (box.landmark) return null;
   if (box.kind !== 'building' || (box.style !== 'glass' && box.style !== 'brick')) return null;
 
   const w = box.max.x - box.min.x;

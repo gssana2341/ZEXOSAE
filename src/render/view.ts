@@ -24,7 +24,7 @@ import {
   type LimbPose,
   type Side,
 } from './body-pose';
-import { createCameraMotion, landCamera, speedFovBoost, stepCameraMotion } from './camera-motion';
+import { createCameraMotion, landCamera, speedFovBoost, stepCameraMotion, stepFovBoost } from './camera-motion';
 import { createChaseCamera, resetChaseCamera, stepChaseCamera } from './chase-camera';
 import type { FirstPersonArms, HeroBody } from './hero';
 import { buildCharacter, paintCharacter, paletteFor, PALETTES, type CharacterView } from './character';
@@ -33,6 +33,7 @@ import { Streets } from './streets';
 import { Lighting } from './lighting';
 import { pixelRatioFor, QUALITY, yieldToBrowser } from './performance';
 import { preloadScenes } from './preload';
+import { shotVisualTip } from './shot-visual';
 import { ARENA_LIMIT, JUMP_PAD_RADIUS, raycast, RING_RADIUS, type GameMap, type V3 } from '../sim/map';
 import type { HitKind } from '../sim/hits';
 import { CONTROL_POINT, type Team } from '../sim/game-modes';
@@ -166,8 +167,13 @@ export class GameView {
     new THREE.MeshBasicMaterial({ color: '#47dfff' }),
   );
   private readonly dummies: CharacterView[] = [];
-  private readonly padRings: THREE.Mesh[] = [];
+  private readonly padRings: THREE.InstancedMesh;
   private readonly padFlash: number[] = [];
+  private readonly padMatrix = new THREE.Matrix4();
+  private readonly padPosition = new THREE.Vector3();
+  private readonly padScale = new THREE.Vector3();
+  private readonly padRotation = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2);
+  private readonly padColor = new THREE.Color();
   private readonly puffs = new WebPuffs();
   private streets: Streets | null = null;
   private trafficShown: string | null = null;
@@ -175,7 +181,7 @@ export class GameView {
   watching = false;
   private readonly gripPoint = new THREE.Vector3();
   /** Strands behind web shots, reused. */
-  private readonly strands: Array<{ web: WebLine; shot: Shot | null; origin: THREE.Vector3 }> = [];
+  private readonly strands: Array<{ web: WebLine; shot: Shot | null; origin: THREE.Vector3; tip: THREE.Vector3; side: Side | null }> = [];
   private readonly crateMeshes: THREE.Mesh[] = [];
   private readonly flyingCrates: THREE.Mesh[] = [];
   private readonly shockwave: THREE.Mesh;
@@ -281,21 +287,24 @@ export class GameView {
     const padBase = new THREE.CylinderGeometry(JUMP_PAD_RADIUS, JUMP_PAD_RADIUS, 0.14, 28);
     const padMaterial = new THREE.MeshBasicMaterial({ color: '#ff4fd8' });
     const padRing = new THREE.TorusGeometry(JUMP_PAD_RADIUS - 0.5, 0.11, 8, 28);
-    for (const pad of map.jumpPads) {
-      const base = new THREE.Mesh(padBase, padMaterial);
-      base.position.set(pad.x, pad.y + 0.07, pad.z);
-      this.scene.add(base);
-
-      const ring = new THREE.Mesh(
-        padRing,
-        new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true }),
-      );
-      ring.rotation.x = Math.PI / 2;
-      ring.position.set(pad.x, pad.y, pad.z);
-      this.scene.add(ring);
-      this.padRings.push(ring);
+    const bases = new THREE.InstancedMesh(padBase, padMaterial, Math.max(1, map.jumpPads.length));
+    bases.count = map.jumpPads.length;
+    this.padRings = new THREE.InstancedMesh(padRing, new THREE.MeshBasicMaterial({
+      color: '#ffffff', transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false,
+    }), Math.max(1, map.jumpPads.length));
+    this.padRings.count = map.jumpPads.length;
+    this.padRings.frustumCulled = false;
+    this.padRings.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    for (const [i, pad] of map.jumpPads.entries()) {
+      this.padMatrix.makeTranslation(pad.x, pad.y + 0.07, pad.z);
+      bases.setMatrixAt(i, this.padMatrix);
+      this.padMatrix.compose(this.padPosition.set(pad.x, pad.y + 0.2, pad.z), this.padRotation, this.padScale.setScalar(1));
+      this.padRings.setMatrixAt(i, this.padMatrix);
+      this.padRings.setColorAt(i, this.padColor.setRGB(1, 1, 1));
       this.padFlash.push(0);
     }
+    this.padRings.instanceColor?.setUsage(THREE.DynamicDrawUsage);
+    this.scene.add(bases, this.padRings);
 
     for (let i = 0; i < Math.max(map.patrols.length, MAX_OTHER_PLAYERS); i += 1) {
       const d = buildCharacter();
@@ -308,7 +317,7 @@ export class GameView {
     this.scene.add(this.puffs.group);
     for (let i = 0; i < MAX_STRANDS; i += 1) {
       const web = new WebLine();
-      this.strands.push({ web, shot: null, origin: new THREE.Vector3() });
+      this.strands.push({ web, shot: null, origin: new THREE.Vector3(), tip: new THREE.Vector3(), side: null });
       this.scene.add(web.group);
     }
 
@@ -336,7 +345,7 @@ export class GameView {
     this.scene.add(this.shockwave);
 
     // Thick at the head, drawn out to nothing behind it.
-    const tailGeometry = new THREE.ConeGeometry(0.075, SHOT_LENGTH, 6).rotateX(-Math.PI / 2);
+    const tailGeometry = new THREE.ConeGeometry(0.075, SHOT_LENGTH, 6).rotateX(-Math.PI / 2).translate(0, 0, -SHOT_LENGTH / 2);
     const headGeometry = new THREE.IcosahedronGeometry(0.15, 0);
     const netGeometry = buildNetGeometry();
     this.shotMaterials = [
@@ -347,8 +356,6 @@ export class GameView {
       const tail = new THREE.Mesh(tailGeometry, this.shotMaterials[0]);
       const head = new THREE.Mesh(headGeometry, this.shotMaterials[0]);
       const net = new THREE.Mesh(netGeometry, this.shotMaterials[1]);
-      head.position.z = SHOT_LENGTH / 2;
-      net.position.z = SHOT_LENGTH / 2;
       tail.add(head, net);
       tail.visible = false;
       this.shots.push({ tail, head, net });
@@ -615,13 +622,6 @@ export class GameView {
       this.camera.rotation.set(pitch, yaw, this.chase.roll * sway);
     } else {
       this.camera.rotation.set(pitch, yaw, this.roll + offset.roll * sway);
-      const flip = this.self.swing;
-      if (this.settings.cameraFlips && !reduce && flip.release >= 0) {
-        // The same turn the body makes in third person, seen from inside it.
-        const turn = releaseTurn(flip.kind, flip.release / RELEASE_TIME);
-        this.camera.rotateX(turn.pitch);
-        this.camera.rotateZ(turn.spin);
-      }
       // Moves the camera along its own right and up, so the sway follows the view.
       this.camera.position.x += Math.cos(yaw) * offset.x * sway;
       this.camera.position.z -= Math.sin(yaw) * offset.x * sway;
@@ -629,12 +629,12 @@ export class GameView {
     }
 
     const speed = totalSpeed(p);
-    // Keep the familiar speed effect and add a gentle stretch in a fast free fall.
+    // A fast dive widens quickly and naturally stretches the view toward its edges.
     const fallSpeed = p.mode === 'air' || p.mode === 'pound' ? Math.max(0, -p.vel.y) : 0;
     const boostTarget = speedFovBoost(speed, fallSpeed, third, reduce, this.settings.speedZoom);
-    this.fovBoost += (boostTarget - this.fovBoost) * blend(6);
+    this.fovBoost = stepFovBoost(this.fovBoost, boostTarget, fallSpeed, dt, reduce);
     const baseFov = third ? Math.min(this.settings.fov, THIRD_PERSON_FOV) : this.settings.fov;
-    this.camera.fov = baseFov + this.fovBoost;
+    this.camera.fov = Math.min(130, baseFov + this.fovBoost);
     this.camera.updateProjectionMatrix();
     if (!reduce && this.settings.screenShake) this.shakeWhileDiving(p.mode === 'air' || p.mode === 'pound' ? -p.vel.y : 0);
 
@@ -648,8 +648,8 @@ export class GameView {
     this.arms?.setPalette(world.myTeam === 'red' ? 0 : OWN_PALETTE);
     if (!third) this.poseFirstPersonArms(p, speed, blend(13), dt);
     this.drawWeb(p, dt);
-    this.drawShots(world);
     this.drawShotStrands(world, third, dt);
+    this.drawShots(world);
     this.streets?.update();
     this.lighting.update(dt);
     this.drawCrates(world, dt);
@@ -755,7 +755,7 @@ export class GameView {
       out.y *= lens;
       return out.applyMatrix4(this.camera.matrixWorld);
     }
-    return this.armRight.getWorldPosition(out);
+    return (side === 1 ? this.armRight : this.armLeft).localToWorld(out.set(0, 0, -0.2));
   }
 
   private poseArms(p: Player, speed: number, k: number): void {
@@ -804,15 +804,18 @@ export class GameView {
 
   private syncWorld(world: World, dt: number): void {
     this.viewFrustum.setFromProjectionMatrix(this.viewProjection.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse));
-    this.padRings.forEach((ring, i) => {
+    world.map.jumpPads.forEach((pad, i) => {
       this.padFlash[i] = Math.max(0, this.padFlash[i] - dt * 2.5);
       // The ring keeps rising to show which way the pad throws.
       const rise = (this.time * 0.8 + i * 0.5) % 1;
-      const material = ring.material as THREE.MeshBasicMaterial;
-      ring.position.y = 0.2 + rise * 2.4 + this.padFlash[i] * 3;
-      ring.scale.setScalar(1 + this.padFlash[i] * 0.6);
-      material.opacity = Math.max(1 - rise, this.padFlash[i]);
+      this.padPosition.set(pad.x, pad.y + 0.2 + rise * 2.4 + this.padFlash[i] * 3, pad.z);
+      this.padScale.setScalar(1 + this.padFlash[i] * 0.6);
+      this.padRings.setMatrixAt(i, this.padMatrix.compose(this.padPosition, this.padRotation, this.padScale));
+      const brightness = Math.max(1 - rise, this.padFlash[i]);
+      this.padRings.setColorAt(i, this.padColor.setRGB(brightness, brightness, brightness));
     });
+    this.padRings.instanceMatrix.needsUpdate = true;
+    if (this.padRings.instanceColor) this.padRings.instanceColor.needsUpdate = true;
 
     this.rings.forEach((ring, i) => {
       ring.visible = !world.online && i === world.ringIndex;
@@ -1093,14 +1096,30 @@ export class GameView {
       if (!free) continue;
       free.shot = shot;
       if (shot.ghost) {
+        free.side = null;
         free.origin.set(shot.pos.x - shot.dir.x * shot.travelled, shot.pos.y - shot.dir.y * shot.travelled, shot.pos.z - shot.dir.z * shot.travelled);
       } else {
-        this.webStart(third, this.kickSide, free.origin);
+        free.side = this.kickSide;
       }
     }
     for (const s of this.strands) {
       if (s.shot && !live.includes(s.shot)) s.shot = null;
-      s.web.update(s.origin, s.shot ? s.shot.pos : null, this.camera, dt, s.shot?.ghost ? OTHER_WEB_WIDTH * 0.6 : OWN_WEB_WIDTH * 0.7, true);
+      if (s.shot) {
+        let fromHand = s.side !== null;
+        if (s.side !== null) this.webStart(third, s.side, s.origin);
+        else if (s.shot.shooter !== undefined) {
+          const index = world.dummies.findIndex((player) => player.id === s.shot!.shooter);
+          const remote = this.dummies[index];
+          if (remote && world.dummies[index]?.respawnT === 0) {
+            const side: Side = world.dummies[index].anchor ? -remote.swing.side as Side : 1;
+            const hand = remote.hero?.handOf(side) ?? (side === 1 ? remote.armRight.tip : remote.armLeft.tip);
+            hand.getWorldPosition(s.origin);
+            fromHand = true;
+          }
+        }
+        shotVisualTip(s.shot, s.origin, s.tip, fromHand);
+      }
+      s.web.update(s.origin, s.shot ? s.tip : null, this.camera, dt, s.shot?.ghost ? OTHER_WEB_WIDTH * 0.6 : OWN_WEB_WIDTH * 0.7, true);
     }
   }
 
@@ -1124,12 +1143,19 @@ export class GameView {
       head.material = material;
       head.visible = !shot.snare;
       net.visible = shot.snare;
-      tail.position.set(shot.pos.x, shot.pos.y, shot.pos.z);
-      tail.lookAt(shot.pos.x + shot.dir.x, shot.pos.y + shot.dir.y, shot.pos.z + shot.dir.z);
+      const strand = this.strands.find((s) => s.shot === shot);
+      if (strand) tail.position.copy(strand.tip);
+      else tail.position.set(shot.pos.x, shot.pos.y, shot.pos.z);
+      tail.lookAt(tail.position.x + shot.dir.x, tail.position.y + shot.dir.y, tail.position.z + shot.dir.z);
+      const length = strand && !shot.ghost ? strand.tip.distanceTo(strand.origin) : shot.travelled;
+      tail.scale.z = Math.min(1, Math.max(0.01, length / SHOT_LENGTH));
+      head.scale.z = 1 / tail.scale.z;
+      net.scale.z = 1 / tail.scale.z;
       if (shot.snare) {
         // A snare opens as it flies, and spins like a thrown net.
         net.rotation.z = this.time * 11;
-        net.scale.setScalar(Math.min(1.5, 0.35 + shot.travelled / 16));
+        const size = Math.min(1.5, 0.35 + shot.travelled / 16);
+        net.scale.set(size, size, size / tail.scale.z);
       }
     });
   }

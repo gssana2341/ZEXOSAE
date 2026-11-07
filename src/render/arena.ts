@@ -9,7 +9,7 @@ import { shellFor } from './shells';
 
 const GRID_METRES = 4;
 /** One window texture repeat, in metres. */
-const FACADE_METRES = 12;
+const FACADE_METRES = 24;
 
 /** These colours are game rules, so they stay bright against the muted city. */
 const KIND_COLORS: Partial<Record<BoxKind, string>> = {
@@ -141,18 +141,35 @@ function gridTexture(): THREE.Texture {
   });
 }
 
-/** Walls with a 4 by 4 block of windows. `lit` draws only the windows that glow. */
+/** Eight floors of varied glass repeat without stretching on the tallest towers. */
 function windowTexture(lit: boolean): THREE.Texture {
   return canvasTexture(256, (ctx) => {
-    ctx.fillStyle = lit ? '#000000' : '#d6dae4';
+    ctx.fillStyle = lit ? '#000000' : '#63758b';
     ctx.fillRect(0, 0, 256, 256);
-    for (let row = 0; row < 4; row += 1) {
-      for (let col = 0; col < 4; col += 1) {
-        const on = noise(row * 4 + col + 3) > 0.8;
+    for (let row = 0; row < 8; row += 1) {
+      for (let col = 0; col < 8; col += 1) {
+        const on = noise(row * 8 + col + 3) > 0.64;
         if (lit && !on) continue;
-        const shade = noise(row * 4 + col + 71);
-        ctx.fillStyle = lit ? (shade < 0.5 ? '#ffdb91' : shade < 0.8 ? '#fff6db' : '#b8dbff') : on ? '#e9d8b8' : '#75839e';
-        ctx.fillRect(col * 64 + 12, row * 64 + 14, 40, 36);
+        const shade = noise(row * 8 + col + 71);
+        const x = col * 32 + 5;
+        const y = row * 32 + 6;
+        if (lit) {
+          ctx.fillStyle = shade < 0.5 ? '#ffdb91' : shade < 0.8 ? '#fff6db' : '#b8dbff';
+          ctx.fillRect(x + 1, y + 1, 20, 18);
+        } else {
+          ctx.fillStyle = '#34475e';
+          ctx.fillRect(x, y, 22, 20);
+          const pane = ctx.createLinearGradient(x, y, x + 20, y + 18);
+          pane.addColorStop(0, shade < 0.4 ? '#b6cfe0' : '#9ebdd1');
+          pane.addColorStop(0.52, shade < 0.4 ? '#779bb8' : '#7394ad');
+          pane.addColorStop(1, '#506d89');
+          ctx.fillStyle = pane;
+          ctx.fillRect(x + 1, y + 1, 20, 18);
+          ctx.fillStyle = 'rgba(232, 246, 255, 0.22)';
+          ctx.fillRect(x + 3, y + 2, 1, 16);
+          ctx.fillStyle = 'rgba(25, 42, 60, 0.38)';
+          ctx.fillRect(x + 11, y + 1, 1, 18);
+        }
       }
     }
   });

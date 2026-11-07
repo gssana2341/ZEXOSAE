@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BLOCK, buildCity, CAR_SIZE, CITY_FROM, OBSERVATION_TOWER, ROAD_WIDTH } from '../src/sim/city';
+import { BLOCK, buildCity, CAR_SIZE, CITY_FROM, OBSERVATION_TOWER, ROAD_WIDTH, SKYLINE_TOWER } from '../src/sim/city';
 import { createArena, raycast, type Box } from '../src/sim/map';
 import { emptyInput, TUNING } from '../src/sim/player';
 import { TICK, World } from '../src/sim/world';
@@ -21,8 +21,11 @@ describe('the street grid', () => {
     const tower = map.boxes.find((box) => box.landmark === 'observation')!;
     expect(tower).toBeDefined();
     expect(tower.max.y).toBe(OBSERVATION_TOWER.height);
-    const otherRoofs = map.boxes.filter((box) => box.kind === 'building' && box !== tower).map((box) => box.max.y);
-    expect(tower.max.y).toBeGreaterThan(Math.max(...otherRoofs) + 50);
+    const second = map.boxes.find((box) => box.landmark === 'skyline')!;
+    expect(second.max.y).toBe(SKYLINE_TOWER.height);
+    const otherRoofs = map.boxes.filter((box) => box.kind === 'building' && !box.landmark).map((box) => box.max.y);
+    expect(tower.max.y).toBeGreaterThan(second.max.y);
+    expect(second.max.y).toBeGreaterThan(Math.max(...otherRoofs) + 40);
     const point = { x: OBSERVATION_TOWER.x, y: OBSERVATION_TOWER.height + 0.05, z: OBSERVATION_TOWER.z };
     expect(raycast(map, { ...point, y: point.y + 2 }, { x: 0, y: -1, z: 0 }, 4)?.box).toBe(tower);
     const world = new World(null, map);

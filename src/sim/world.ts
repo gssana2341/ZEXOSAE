@@ -66,6 +66,8 @@ export interface Shot {
   travelled: number;
   /** Another player's shot: drawn here, but their game decides if it hits. */
   ghost?: boolean;
+  /** Player who fired a remote visual shot, when known. */
+  shooter?: number;
   friendly?: boolean;
   /** A thrown crate: slower, bigger and harder hitting than a web shot. */
   crate?: boolean;
@@ -205,8 +207,8 @@ export class World {
     this.danger = createDanger();
   }
 
-  addGhostShot(origin: V3, dir: V3, snare: boolean, crate = false, friendly = false): void {
-    this.shots.push({ pos: origin, dir, snare, travelled: 0, ghost: true, crate, friendly });
+  addGhostShot(origin: V3, dir: V3, snare: boolean, crate = false, friendly = false, shooter?: number): void {
+    this.shots.push({ pos: origin, dir, snare, travelled: 0, ghost: true, crate, friendly, shooter });
   }
 
   /** Back to spawn and restart the lap. Dummies and the best time are kept. */

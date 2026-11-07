@@ -24,8 +24,8 @@ export interface Box {
   max: V3;
   kind: BoxKind;
   style?: BoxStyle;
-  /** The tallest tower has a regular facade and an open viewing roof. */
-  landmark?: 'observation';
+  /** Landmark towers have detailed facades and open, walkable roofs. */
+  landmark?: 'observation' | 'skyline';
 }
 
 export interface Patrol {
@@ -79,6 +79,71 @@ function block(
     kind,
     style,
   };
+}
+
+/** Places pads on clear roofs throughout the city, never on the roads below. */
+function rooftopJumpPads(boxes: Box[], spawns: SpawnPoint[]): V3[] {
+  const margin = JUMP_PAD_RADIUS + 1.2;
+  const candidates: V3[] = [];
+  // Only nearby solids can obstruct a launch. Group them once instead of scanning
+  // every street prop for every possible pad while the map is being built.
+  const cellSize = 56;
+  const nearby = new Map<string, Box[]>();
+  for (const box of boxes) {
+    if (box.kind === 'ground' || box.kind === 'bound') continue;
+    for (let x = Math.floor(box.min.x / cellSize); x <= Math.floor(box.max.x / cellSize); x += 1) {
+      for (let z = Math.floor(box.min.z / cellSize); z <= Math.floor(box.max.z / cellSize); z += 1) {
+        const key = `${x},${z}`;
+        const cell = nearby.get(key) ?? [];
+        cell.push(box);
+        nearby.set(key, cell);
+      }
+    }
+  }
+  const blockedAt = (pad: V3, roof: Box): boolean => {
+    for (let x = Math.floor((pad.x - margin) / cellSize); x <= Math.floor((pad.x + margin) / cellSize); x += 1) {
+      for (let z = Math.floor((pad.z - margin) / cellSize); z <= Math.floor((pad.z + margin) / cellSize); z += 1) {
+        const cell = nearby.get(`${x},${z}`) ?? [];
+        if (cell.some((box) => box !== roof && box.max.y > pad.y + 0.05 && box.min.y < pad.y + 32 &&
+          pad.x + margin > box.min.x && pad.x - margin < box.max.x &&
+          pad.z + margin > box.min.z && pad.z - margin < box.max.z)) return true;
+      }
+    }
+    return false;
+  };
+  for (const roof of boxes) {
+    const width = roof.max.x - roof.min.x;
+    const depth = roof.max.z - roof.min.z;
+    if (roof.kind !== 'building' || roof.max.y < 8 || width < 14 || depth < 14) continue;
+    const cx = (roof.min.x + roof.max.x) / 2;
+    const cz = (roof.min.z + roof.max.z) / 2;
+    const dx = Math.min(7, width / 2 - margin);
+    const dz = Math.min(7, depth / 2 - margin);
+    for (const [sx, sz] of [[-1, -1], [1, 1], [-1, 1], [1, -1]]) {
+      const pad = v(cx + sx * dx, roof.max.y, cz + sz * dz);
+      if (spawns.some(({ pos }) => Math.hypot(pos.x - pad.x, pos.y - pad.y, pos.z - pad.z) < 7)) continue;
+      if (!blockedAt(pad, roof)) candidates.push(pad);
+    }
+  }
+
+  // One nearby roof per district, with space between pads. Fixed ordering keeps
+  // every player's map and jump-pad event indices identical online.
+  const selected: V3[] = [];
+  for (let x = -336; x <= 336; x += 112) {
+    for (let z = -336; z <= 336; z += 112) {
+      if (x === 0 && z === 0) continue;
+      let best: V3 | undefined;
+      let distance = 90;
+      for (const pad of candidates) {
+        const d = Math.hypot(pad.x - x, pad.z - z);
+        if (d >= distance || selected.some((other) => Math.hypot(other.x - pad.x, other.z - pad.z) < 75)) continue;
+        best = pad;
+        distance = d;
+      }
+      if (best) selected.push(best);
+    }
+  }
+  return selected;
 }
 
 /**
@@ -203,12 +268,7 @@ export function createArena(): GameMap {
 
   const spawn = v(0, 24.05, 52);
 
-  return {
-    boxes,
-    scenery: city.scenery,
-    spawn,
-    spawnYaw: 0,
-    spawns: [
+  const spawns = [
       spawn,
       v(-10, 24.05, 44),
       v(10, 24.05, 56),
@@ -246,8 +306,14 @@ export function createArena(): GameMap {
       v(-80, 0.05, 136),
       v(80, 0.05, -136),
       ...outerSpawns,
-    ].map((pos) => ({ pos, yaw: Math.atan2(pos.x, pos.z) })),
-    jumpPads: [v(-14, 0, 8), v(14, 0, -8)],
+    ].map((pos) => ({ pos, yaw: Math.atan2(pos.x, pos.z) }));
+  return {
+    boxes,
+    scenery: city.scenery,
+    spawn,
+    spawnYaw: 0,
+    spawns,
+    jumpPads: [v(-14, 0, 8), v(14, 0, -8), ...rooftopJumpPads(boxes, spawns)],
     rings: [
       v(0, 18, 31),
       v(23, 14, 21),

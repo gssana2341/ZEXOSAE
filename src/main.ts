@@ -199,7 +199,7 @@ function onNetMessage(m: ServerMessage): void {
       hud.toast(`${m.player.name} เข้าห้อง`);
       break;
     case 'shot':
-      world.addGhostShot(toV3(m.origin), toV3(m.dir), m.snare, m.crate === true, net.match?.mode === 'teams' && !!net.players.get(m.id)?.team && net.players.get(m.id)?.team === net.players.get(net.id)?.team);
+      world.addGhostShot(toV3(m.origin), toV3(m.dir), m.snare, m.crate === true, net.match?.mode === 'teams' && !!net.players.get(m.id)?.team && net.players.get(m.id)?.team === net.players.get(net.id)?.team, m.id);
       break;
     case 'knock':
       if (m.target === net.id) knockPlayer(world.player, world.map, toV3(m.vel), m.stun, m.pin);

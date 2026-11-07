@@ -143,7 +143,8 @@ export class WebLine {
     this.draw(camera, width * fade);
 
     const landed = Math.min(1, Math.max(0, (this.age - WEB.shootTime) / 0.12));
-    this.splat.visible = landed > 0;
+    // A flying projectile has not landed anywhere yet; only anchored webs splat.
+    this.splat.visible = !follow && landed > 0;
     this.splat.position.copy(this.anchor);
     this.splat.lookAt(this.hand);
     // Hits a little too big, then settles.

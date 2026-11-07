@@ -56,6 +56,14 @@ describe('web line', () => {
     expect(lineEnd(web)).toBeLessThan(1);
   });
 
+  it('does not show an impact burst on a projectile still flying', () => {
+    const web = new WebLine();
+    web.update(hand, anchor, camera, dt, 0.03, true);
+    expect(web.group.children[1].visible).toBe(false);
+    settle(web);
+    expect(web.group.children[1].visible).toBe(true);
+  });
+
   it('falls away after release, then hides', () => {
     const web = new WebLine();
     settle(web);

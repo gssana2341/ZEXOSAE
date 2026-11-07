@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ARENA_LIMIT, createArena, nearbyBoxes, raycast, type Box, type V3 } from '../src/sim/map';
+import { ARENA_LIMIT, createArena, JUMP_PAD_RADIUS, nearbyBoxes, raycast, type Box, type V3 } from '../src/sim/map';
 import { createPlayer, emptyInput, findAnchor, TUNING } from '../src/sim/player';
 import { TICK, World } from '../src/sim/world';
 import { farTowers } from '../src/render/arena';
@@ -115,13 +115,34 @@ describe('the Spire district', () => {
   });
 
   it('jump pads have a clear flight and stay off spawn points', () => {
-    expect(map.jumpPads).toHaveLength(2);
+    expect(map.jumpPads.length).toBeGreaterThan(25);
+    const roofs = map.jumpPads.filter((pad) => pad.y > 0);
+    for (const [sx, sz] of [[-1, -1], [1, 1], [-1, 1], [1, -1]]) {
+      expect(roofs.some((pad) => sx * pad.x > 250 && sz * pad.z > 250)).toBe(true);
+    }
     for (const pad of map.jumpPads) {
       for (const { pos } of map.spawns) {
         expect(Math.hypot(pos.x - pad.x, pos.y - pad.y, pos.z - pad.z)).toBeGreaterThan(4);
       }
-      expect(raycast(map, { ...pad, y: 0.1 }, { x: 0, y: 1, z: 0 }, 32)).toBeNull();
+      expect(raycast(map, { ...pad, y: pad.y + 0.1 }, { x: 0, y: 1, z: 0 }, 32)).toBeNull();
+      if (pad.y > 0) {
+        expect(map.boxes.some((box) => box.kind === 'building' && box.max.y === pad.y &&
+          pad.x - JUMP_PAD_RADIUS > box.min.x && pad.x + JUMP_PAD_RADIUS < box.max.x &&
+          pad.z - JUMP_PAD_RADIUS > box.min.z && pad.z + JUMP_PAD_RADIUS < box.max.z)).toBe(true);
+      } else {
+        // The original ground pads are inside the plaza, away from its ring road.
+        expect(Math.max(Math.abs(pad.x), Math.abs(pad.z))).toBeLessThan(21 - JUMP_PAD_RADIUS);
+      }
     }
+  });
+
+  it('launches a player from a rooftop pad', () => {
+    const pad = map.jumpPads.find((p) => p.y > 0)!;
+    const world = new World(null, map);
+    world.respawnAt({ ...pad, y: pad.y + 0.05 }, 0);
+    world.step(emptyInput(), TICK);
+    expect(world.player.vel.y).toBeGreaterThan(30);
+    expect(world.events.some((event) => event.type === 'jumpPad')).toBe(true);
   });
 
   it('keeps everything inside the arena limit', () => {

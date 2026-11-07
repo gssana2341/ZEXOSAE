@@ -4,6 +4,7 @@ import {
   landCamera,
   stepCameraMotion,
   speedFovBoost,
+  stepFovBoost,
   type CameraMotionInput,
   type CameraOffset,
 } from '../src/render/camera-motion';
@@ -28,15 +29,18 @@ function run(seconds: number, extra: Partial<CameraMotionInput>, m = createCamer
 const spread = (values: number[]) => Math.max(...values) - Math.min(...values);
 
 describe('camera motion', () => {
-  it('widens smoothly with speed and adds a little more for a fast dive', () => {
+  it('widens rapidly and substantially for a fast dive while respecting motion settings', () => {
     const still = speedFovBoost(0, 0, true, false, true);
     const fast = speedFovBoost(40, 0, true, false, true);
     const dive = speedFovBoost(40, 40, true, false, true);
     expect(still).toBe(0);
     expect(fast).toBeGreaterThan(still);
-    expect(dive).toBeGreaterThan(fast);
+    expect(dive - fast).toBeGreaterThan(12);
     expect(speedFovBoost(60, 60, true, true, true)).toBeLessThanOrEqual(4);
     expect(speedFovBoost(60, 60, true, false, false)).toBe(0);
+    expect(stepFovBoost(0, dive, 40, 0.1, false)).toBeGreaterThan(dive * 0.75);
+    expect(stepFovBoost(0, dive, 0, 0.1, false)).toBeLessThan(dive * 0.5);
+    expect(stepFovBoost(dive, 0, 40, 0.1, false)).toBeGreaterThan(dive * 0.5);
   });
 
   it('stays still when standing', () => {
