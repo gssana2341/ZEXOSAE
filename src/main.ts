@@ -13,8 +13,9 @@ import { emptyInput, knockPlayer, poseOf, snarePlayer, webLineOf, type Player } 
 import type { V3 } from './sim/map';
 import { TICK, World } from './sim/world';
 import { formatTime, Hud, Menus } from './ui';
+import { MatchResults } from './results';
 
-type State = 'menu' | 'playing' | 'paused';
+type State = 'menu' | 'playing' | 'paused' | 'results';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#game')!;
 const uiRoot = document.querySelector<HTMLElement>('#ui')!;
@@ -52,6 +53,7 @@ const frameLimiter = new FrameLimiter();
 /** Set while waiting to respawn: the name of whoever got the KO. */
 let koBy: string | null = null;
 let stateTimer = 0;
+let releasingPointerForResults = false;
 
 const toV3 = (v: Vec): V3 => ({ x: v[0], y: v[1], z: v[2] });
 const toVec = (v: V3): Vec => [
@@ -87,14 +89,15 @@ function toggleView(): void {
   view.cameraChanged();
 }
 
-function play(): void {
+function play(lock = true): void {
   state = 'playing';
   menus.hide();
+  results.hide();
   hud.setVisible(true);
   input.enabled = true;
   lastFrame = performance.now();
   accumulator = 0;
-  lockPointer();
+  if (lock) lockPointer();
 }
 
 function restart(): void {
@@ -149,6 +152,7 @@ function backToMenu(): void {
   input.clear();
   world.setOnline(false);
   hud.online = null;
+  results.hide();
   if (document.pointerLockElement) document.exitPointerLock();
   hud.setVisible(false);
 }
@@ -185,9 +189,14 @@ function onNetMessage(m: ServerMessage): void {
       hud.toast(m.watching ? `กำลังดูห้อง ${m.code}` : `ห้อง ${m.code}`);
       break;
     case 'roundStart': {
+      const fromResults = state === 'results';
       const spawn = m.spawns.find((s) => s.id === net.id);
       setKoBy(null);
       if (spawn) spawnAt(spawn.pos, spawn.yaw);
+      if (fromResults) {
+        play(false);
+        if (!touchDevice) hud.toast('คลิกในเกมเพื่อควบคุม');
+      }
       hud.callout('เริ่มรอบใหม่!', true);
       break;
     }
@@ -335,8 +344,26 @@ const menus = new Menus(uiRoot, settings, profile, {
   },
 });
 
+const results = new MatchResults(uiRoot, {
+  ready(ready) {
+    if (net.match?.phase === 'finished') net.send({ t: 'rematch', round: net.match.round, ready });
+  },
+  leave() {
+    net.close();
+    backToMenu();
+    restart();
+    menus.showOnline();
+  },
+});
+
 document.addEventListener('pointerlockchange', () => {
-  if (!document.pointerLockElement) pause();
+  if (document.pointerLockElement) {
+    releasingPointerForResults = false;
+  } else if (releasingPointerForResults) {
+    releasingPointerForResults = false;
+  } else {
+    pause();
+  }
 });
 canvas.addEventListener('click', () => {
   if (state === 'playing' && !document.pointerLockElement) lockPointer();
@@ -467,6 +494,23 @@ function sendState(dt: number): void {
 function frame(now: number): void {
   const dt = Math.min(0.1, (now - lastFrame) / 1000);
   lastFrame = now;
+
+  if (world.online && net.match?.phase === 'finished') {
+    if (state !== 'results') {
+      state = 'results';
+      input.enabled = false;
+      input.clear();
+      accumulator = 0;
+      menus.hide();
+      hud.setVisible(false);
+      setKoBy(null);
+      if (document.pointerLockElement) {
+        releasingPointerForResults = true;
+        document.exitPointerLock();
+      }
+    }
+    results.update(net.match, [...net.players.values()], net.id, watching, net.isHost);
+  }
 
   // An online match keeps going behind the pause menu.
   const running = state === 'playing' || (state === 'paused' && world.online);

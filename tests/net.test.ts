@@ -250,6 +250,7 @@ describe('ping', () => {
 describe('message checks', () => {
   it('accepts valid messages', () => {
     expect(parseClientMessage('{"t":"state","pos":[1,2,3],"yaw":0,"pitch":0,"anchor":null}')?.t).toBe('state');
+    expect(parseClientMessage('{"t":"rematch","round":3,"ready":true}')).toEqual({ t: 'rematch', round: 3, ready: true });
   });
 
   it.each([
@@ -262,6 +263,8 @@ describe('message checks', () => {
     `{"t":"join","code":"ABCD","name":"${'x'.repeat(100)}"}`,
     '{"t":"join","name":"x"}',
     '{"t":"list"}',
+    '{"t":"rematch","round":1.5,"ready":true}',
+    '{"t":"rematch","round":1,"ready":"yes"}',
   ])('rejects %s', (raw) => {
     expect(parseClientMessage(raw)).toBeNull();
   });

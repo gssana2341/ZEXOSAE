@@ -330,7 +330,12 @@ export class NetClient {
           this.lastSnapshotSeq = m.seq;
         }
         const at = performance.now();
-        if (m.match && isGameMode(m.match.mode)) this.match = m.match;
+        if (m.match && isGameMode(m.match.mode)) {
+          const previous = this.match;
+          this.match = m.match.phase === 'finished' && previous?.phase === 'finished' && previous.round === m.match.round
+            ? { ...m.match, standings: m.match.standings ?? previous.standings }
+            : m.match;
+        }
         for (const s of m.scores ?? []) {
           const player = this.players.get(s.id);
           if (player) player.score = s.score;
@@ -344,6 +349,8 @@ export class NetClient {
         return;
       }
       case 'roundStart':
+        if (this.match && (m.match.round < this.match.round ||
+          (m.match.round === this.match.round && this.match.phase === 'finished'))) return;
         if (typeof m.seq === 'number') this.lastSnapshotSeq = Math.max(this.lastSnapshotSeq, m.seq);
         if (m.match && isGameMode(m.match.mode)) this.match = m.match;
         this.players.clear();
@@ -351,6 +358,20 @@ export class NetClient {
         this.samples.clear();
         this.frozenUntil.clear();
         break;
+      case 'roundEnd': {
+        if (!m.match || !isGameMode(m.match.mode) || (this.match && m.match.round < this.match.round)) return;
+        if (m.seq <= this.lastSnapshotSeq) {
+          // An unreliable snapshot can arrive before the reliable final board.
+          // Keep the newer readiness state while attaching the frozen standings.
+          if (this.match?.phase === 'finished' && this.match.round === m.match.round) {
+            this.match = { ...this.match, standings: m.match.standings };
+          }
+          return;
+        }
+        this.lastSnapshotSeq = m.seq;
+        this.match = m.match;
+        break;
+      }
       case 'damage': {
         const target = this.players.get(m.target);
         const shooter = this.players.get(m.by);

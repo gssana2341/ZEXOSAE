@@ -365,7 +365,7 @@ export class Hud {
     this.best.textContent = match?.phase === 'waiting'
       ? 'รอผู้เล่นอย่างน้อย 2 คน'
       : match?.phase === 'finished'
-        ? `${match.result} เริ่มรอบใหม่ในอีกสักครู่`
+        ? match.result
         : mode === 'crown'
           ? match?.holder === online.myId ? '👑 คุณกำลังถือมงกุฎ!' : holder ? `👑 ${holder.name} กำลังถือมงกุฎ` : '👑 มงกุฎอยู่บนพื้น ไปเก็บเลย'
           : `คะแนน ${me?.score ?? 0}/${MODE_INFO[mode].goal}`;

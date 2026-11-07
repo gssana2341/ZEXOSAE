@@ -10,6 +10,7 @@ import {
   type ClientMessage,
   type PlayerInfo,
   type MatchState,
+  type FinalStanding,
   type PoseMode,
   type ServerMessage,
   type Vec,
@@ -18,7 +19,7 @@ import { HITS, hitDamage, MAX_KNOCK, MAX_STUN, type HitKind } from '../sim/hits'
 import { ARENA_FLOOR, ARENA_LIMIT, createArena, raycast } from '../sim/map';
 import { MOVES } from '../sim/moves';
 import type { Mode } from '../sim/player';
-import { CONTROL_POINT, CROWN_CARRY_HEIGHT, CROWN_PICKUP_RADIUS, CROWN_SPAWN, MIN_MATCH_PLAYERS, MODE_INFO, ROUND_BREAK_MS, type GameMode, type Team } from '../sim/game-modes';
+import { CONTROL_POINT, CROWN_CARRY_HEIGHT, CROWN_PICKUP_RADIUS, CROWN_SPAWN, MIN_MATCH_PLAYERS, MODE_INFO, type GameMode, type Team } from '../sim/game-modes';
 
 /** Allows for lag between what the shooter saw and the last position the server has. */
 const HIT_RANGE_MARGIN = 25;
@@ -80,12 +81,14 @@ export class Room {
   private nextId = 1;
   private snapshotSeq = 0;
   private phase: MatchState['phase'] = 'waiting';
+  private round = 0;
   private roundEnd = 0;
-  private breakEnd = 0;
   private lastTick = 0;
   private holder: number | null = null;
   private looseCrown: Vec | null = null;
   private result = '';
+  private standings: FinalStanding[] = [];
+  private readonly ready = new Set<number>();
   private teamScores: Record<Team, number> = { red: 0, blue: 0 };
 
   constructor(
@@ -96,13 +99,18 @@ export class Room {
     readonly gameMode: GameMode = 'deathmatch',
   ) {}
 
-  private match(now = this.now()): MatchState {
+  private match(now = this.now(), includeStandings = false): MatchState {
     const remaining = this.phase === 'playing' ? Math.max(0, Math.ceil((this.roundEnd - now) / 1000)) : 0;
     const carrier = this.holder === null ? null : this.players.get(this.holder);
     const crown: Vec | null = this.gameMode !== 'crown' || this.phase === 'waiting'
       ? null
       : carrier ? [carrier.pos[0], carrier.pos[1] + CROWN_CARRY_HEIGHT, carrier.pos[2]] : this.looseCrown;
-    return { mode: this.gameMode, phase: this.phase, remaining, teamScores: { ...this.teamScores }, holder: this.holder, crown, result: this.result };
+    return {
+      mode: this.gameMode, phase: this.phase, round: this.round, remaining,
+      teamScores: { ...this.teamScores }, holder: this.holder, crown, result: this.result,
+      ready: [...this.ready],
+      ...(includeStandings && this.phase === 'finished' ? { standings: this.standings.map((p) => ({ ...p })) } : {}),
+    };
   }
 
   private nextTeam(): Team | undefined {
@@ -152,7 +160,7 @@ export class Room {
       players: [...this.players.values()].map(info),
       pos: player.pos,
       yaw: spawn.yaw,
-      match: this.match(),
+      match: this.match(this.now(), true),
     });
     if (this.phase === 'waiting' && this.players.size >= MIN_MATCH_PLAYERS) this.startRound();
     return player.id;
@@ -172,7 +180,7 @@ export class Room {
       players: [...this.players.values()].map(info),
       pos: first ? first.pos : [0, 40, 0],
       yaw: first?.yaw ?? 0,
-      match: this.match(),
+      match: this.match(this.now(), true),
       watching: true,
     });
     return id;
@@ -184,12 +192,15 @@ export class Room {
 
   remove(id: number): void {
     if (this.watchers.delete(id)) return;
-    if (this.gameMode === 'crown' && this.phase === 'playing' && this.now() >= this.roundEnd) this.finishRound();
+    this.finishIfExpired();
     const leaving = this.players.get(id);
     if (leaving && this.gameMode === 'crown' && this.holder === id && this.phase === 'playing') this.dropCrown(leaving);
     if (!this.players.delete(id)) return;
+    this.ready.delete(id);
     this.broadcast({ t: 'playerLeave', id });
-    if (this.players.size < MIN_MATCH_PLAYERS) {
+    if (this.phase === 'finished') {
+      this.startIfReady();
+    } else if (this.players.size < MIN_MATCH_PLAYERS) {
       this.phase = 'waiting';
       this.holder = null;
       this.looseCrown = null;
@@ -206,8 +217,8 @@ export class Room {
     }
     const player = this.players.get(id);
     if (!player) return;
-    // The holder at the deadline wins, even if the next tick has not run yet.
-    if (this.gameMode === 'crown' && this.phase === 'playing' && this.now() >= this.roundEnd) this.finishRound();
+    // The result is fixed at the deadline, even if the next tick has not run yet.
+    this.finishIfExpired();
 
     switch (m.t) {
       case 'ping':
@@ -226,7 +237,13 @@ export class Room {
         }
         break;
       case 'heal':
-        this.handleHeal(player);
+        if (this.phase !== 'finished') this.handleHeal(player);
+        break;
+      case 'rematch':
+        if (this.phase !== 'finished' || m.round !== this.round) break;
+        if (m.ready) this.ready.add(id);
+        else this.ready.delete(id);
+        this.startIfReady();
         break;
       case 'shot':
         if (player.alive && this.phase !== 'finished') this.broadcast({ ...m, id }, id);
@@ -326,15 +343,13 @@ export class Room {
   tick(): void {
     const now = this.now();
     if (this.phase === 'playing') {
-      const elapsed = Math.max(0, Math.min(1000, now - this.lastTick)) / 1000;
+      const elapsed = Math.max(0, Math.min(1000, Math.min(now, this.roundEnd) - this.lastTick)) / 1000;
       if (this.gameMode === 'crown' && now >= this.roundEnd) this.finishRound();
       if (this.gameMode === 'control') this.stepControl(elapsed);
       if (this.phase === 'playing' && this.gameMode === 'crown' && this.holder === null) {
         for (const player of this.players.values()) this.collectCrown(player);
       }
       if (this.phase === 'playing' && now >= this.roundEnd) this.finishRound();
-    } else if (this.phase === 'finished' && now >= this.breakEnd && this.players.size >= MIN_MATCH_PLAYERS) {
-      this.startRound();
     }
     this.lastTick = now;
     for (const p of this.players.values()) {
@@ -365,12 +380,15 @@ export class Room {
   private startRound(): void {
     const now = this.now();
     this.phase = 'playing';
+    this.round += 1;
     this.roundEnd = now + MODE_INFO[this.gameMode].seconds * 1000;
     this.lastTick = now;
     this.teamScores = { red: 0, blue: 0 };
     this.holder = null;
     this.looseCrown = this.gameMode === 'crown' ? [CROWN_SPAWN.x, CROWN_SPAWN.y, CROWN_SPAWN.z] : null;
     this.result = '';
+    this.standings = [];
+    this.ready.clear();
     const spawns: Array<{ id: number; pos: Vec; yaw: number }> = [];
     for (const p of this.players.values()) {
       const spawn = this.pickSpawn(p.spawn);
@@ -391,7 +409,12 @@ export class Room {
       p.lastHealAt = 0;
       spawns.push({ id: p.id, pos: p.pos, yaw: p.yaw });
     }
-    this.broadcast({ t: 'roundStart', seq: this.snapshotSeq, match: this.match(now), players: [...this.players.values()].map(info), spawns });
+    this.broadcast({ t: 'roundStart', seq: ++this.snapshotSeq, match: this.match(now), players: [...this.players.values()].map(info), spawns });
+  }
+
+  private startIfReady(): void {
+    if (this.phase !== 'finished' || this.players.size < MIN_MATCH_PLAYERS) return;
+    if ([...this.players.keys()].every((id) => this.ready.has(id))) this.startRound();
   }
 
   private collectCrown(player: RoomPlayer): void {
@@ -427,25 +450,53 @@ export class Room {
     if (owner.score >= MODE_INFO.control.goal) this.finishRound();
   }
 
+  /** An event arriving just after the deadline must not change the final result. */
+  private finishIfExpired(): void {
+    if (this.phase !== 'playing' || this.now() < this.roundEnd) return;
+    if (this.gameMode === 'control') {
+      const elapsed = Math.max(0, Math.min(1000, this.roundEnd - this.lastTick)) / 1000;
+      this.lastTick = this.roundEnd;
+      this.stepControl(elapsed);
+    }
+    if (this.phase === 'playing') this.finishRound();
+  }
+
   private finishRound(): void {
     if (this.phase !== 'playing') return;
     this.phase = 'finished';
-    this.breakEnd = this.now() + ROUND_BREAK_MS;
+    this.ready.clear();
+    let crownWinner: number | null = null;
     if (this.gameMode === 'crown') {
       const winner = this.holder === null ? null : this.players.get(this.holder);
+      crownWinner = winner?.alive ? winner.id : null;
       this.result = winner?.alive ? `${winner.name} ชนะ!` : 'ไม่มีผู้ชนะ เพราะไม่มีคนถือมงกุฎ';
-      return;
-    }
-    this.holder = null;
-    if (this.gameMode === 'teams') {
+    } else if (this.gameMode === 'teams') {
+      this.holder = null;
       const { red, blue } = this.teamScores;
       this.result = red === blue ? 'เสมอกัน!' : `${red > blue ? 'ทีมแดง' : 'ทีมน้ำเงิน'} ชนะ!`;
-      return;
+    } else {
+      this.holder = null;
+      const ranked = [...this.players.values()].sort((a, b) => b.score - a.score);
+      this.result = !ranked.length || (ranked.length > 1 && Math.abs(ranked[0].score - ranked[1].score) < 0.001)
+        ? 'เสมอกัน!'
+        : `${ranked[0].name} ชนะ!`;
     }
-    const ranked = [...this.players.values()].sort((a, b) => b.score - a.score);
-    this.result = !ranked.length || (ranked.length > 1 && Math.abs(ranked[0].score - ranked[1].score) < 0.001)
-      ? 'เสมอกัน!'
-      : `${ranked[0].name} ชนะ!`;
+    const ranked = [...this.players.values()].sort((a, b) =>
+      (this.gameMode === 'crown' ? Number(b.id === crownWinner) - Number(a.id === crownWinner) : b.score - a.score) ||
+      b.kills - a.kills || a.deaths - b.deaths || a.id - b.id);
+    this.standings = ranked.map((player, i) => ({
+      id: player.id, name: player.name, kills: player.kills, deaths: player.deaths,
+      score: Math.round(player.score * 100) / 100, team: player.team,
+      rank: this.gameMode === 'crown'
+        ? player.id === crownWinner ? 1 : null
+        : i > 0 && Math.abs(player.score - ranked[i - 1].score) < 0.001 ? this.standingsRank(ranked, i) : i + 1,
+    }));
+    this.broadcast({ t: 'roundEnd', seq: ++this.snapshotSeq, match: this.match(this.now(), true) });
+  }
+
+  private standingsRank(ranked: RoomPlayer[], index: number): number {
+    while (index > 0 && Math.abs(ranked[index].score - ranked[index - 1].score) < 0.001) index -= 1;
+    return index + 1;
   }
 
   /** A random spawn away from everyone alive, and not the one just used. */

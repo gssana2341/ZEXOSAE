@@ -15,7 +15,6 @@ export const CONTROL_POINT = { x: 0, y: 0, z: 16, radius: 8, height: 10 } as con
 export const CROWN_SPAWN = { x: 0, y: 1, z: 16 } as const;
 export const CROWN_PICKUP_RADIUS = 2.5;
 export const CROWN_CARRY_HEIGHT = 2.25;
-export const ROUND_BREAK_MS = 8000;
 export const MIN_MATCH_PLAYERS = 2;
 
 export function isGameMode(value: unknown): value is GameMode {

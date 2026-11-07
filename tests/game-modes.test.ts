@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { Room, type Client } from '../src/net/room';
 import { NetClient } from '../src/net/client';
 import { RESPAWN_MS, SPAWN_PROTECT_MS, type ServerMessage, type Vec } from '../src/net/protocol';
-import { CONTROL_POINT, CROWN_CARRY_HEIGHT, CROWN_SPAWN, MODE_INFO, ROUND_BREAK_MS, type GameMode } from '../src/sim/game-modes';
+import { CONTROL_POINT, CROWN_CARRY_HEIGHT, CROWN_SPAWN, MODE_INFO, type GameMode } from '../src/sim/game-modes';
 import { emptyInput } from '../src/sim/player';
 import { TICK, World } from '../src/sim/world';
 import { createTestArena } from './test-map';
@@ -57,7 +57,7 @@ describe('online match lifecycle', () => {
     expect(client.players.get(joined.id)?.score).toBe(1);
   });
 
-  it('waits for two players, ends on the timer, and starts a fresh round', () => {
+  it('keeps the final results until every remaining player chooses a rematch', () => {
     const g = setup('deathmatch', 1);
     g.tick();
     expect(g.clients[0].last('snapshot')?.match.phase).toBe('waiting');
@@ -70,13 +70,94 @@ describe('online match lifecycle', () => {
     g.tick(MODE_INFO.deathmatch.seconds * 1000);
     expect(other.last('snapshot')!.seq).toBeGreaterThan(firstSeq);
     expect(other.last('snapshot')?.match).toMatchObject({ phase: 'finished', result: 'เสมอกัน!' });
-    g.tick(ROUND_BREAK_MS);
+    const end = other.last('roundEnd')!;
+    expect(end.match.standings?.map((p) => p.rank)).toEqual([1, 1]);
+    g.tick(60000);
+    expect(other.last('snapshot')?.match.phase).toBe('finished');
+    const round = end.match.round;
+    g.room.handle(g.ids[0], { t: 'rematch', round, ready: true });
+    g.tick();
+    expect(other.last('snapshot')?.match.ready).toEqual([g.ids[0]]);
+    g.room.handle(g.ids[0], { t: 'rematch', round, ready: false });
+    g.room.handle(id, { t: 'rematch', round: round - 1, ready: true });
+    g.tick();
+    expect(other.last('snapshot')?.match.ready).toEqual([]);
+    g.room.handle(g.ids[0], { t: 'rematch', round, ready: true });
+    g.room.handle(id, { t: 'rematch', round, ready: true });
+    g.tick();
     expect(other.last('snapshot')?.match.phase).toBe('playing');
     expect(other.last('snapshot')!.seq).toBeGreaterThan(other.last('roundStart')!.seq);
     expect(other.last('roundStart')?.players.every((p) => p.score === 0 && p.hp === 100)).toBe(true);
+    expect(other.last('roundStart')?.match.round).toBe(round + 1);
     g.room.remove(id);
     g.tick();
     expect(g.clients[0].last('snapshot')?.match.phase).toBe('waiting');
+  });
+
+  it('preserves the finished board when players leave, and waits for at least two', () => {
+    const g = setup('deathmatch');
+    g.tick(MODE_INFO.deathmatch.seconds * 1000);
+    const end = g.clients[0].last('roundEnd')!;
+    g.room.remove(g.ids[1]);
+    g.tick();
+    expect(g.clients[0].last('snapshot')?.match.phase).toBe('finished');
+    const late = new Recorder();
+    const lateId = g.room.add(late, 'P3')!;
+    expect(late.last('joined')?.match.standings).toEqual(end.match.standings);
+    expect(late.last('joined')?.match.standings?.map((p) => p.name)).toEqual(['P1', 'P2']);
+    g.room.handle(g.ids[0], { t: 'rematch', round: end.match.round, ready: true });
+    g.tick();
+    expect(g.clients[0].last('snapshot')?.match.phase).toBe('finished');
+    g.room.handle(lateId, { t: 'rematch', round: end.match.round, ready: true });
+    expect(g.clients[0].last('roundStart')?.match.round).toBe(end.match.round + 1);
+  });
+
+  it('does not let spectators vote, but starts if only ready players remain', () => {
+    const g = setup('deathmatch', 3);
+    const spectator = new Recorder();
+    const watchId = g.room.watch(spectator)!;
+    g.tick(MODE_INFO.deathmatch.seconds * 1000);
+    const round = g.clients[0].last('roundEnd')!.match.round;
+    g.room.handle(watchId, { t: 'rematch', round, ready: true });
+    g.room.handle(g.ids[0], { t: 'rematch', round, ready: true });
+    g.room.handle(g.ids[1], { t: 'rematch', round, ready: true });
+    g.tick();
+    expect(g.clients[0].last('snapshot')?.match.ready).toEqual([g.ids[0], g.ids[1]]);
+    g.room.remove(g.ids[2]);
+    expect(g.clients[0].last('roundStart')?.match.round).toBe(round + 1);
+  });
+
+  it('keeps the reliable results when a newer snapshot arrives first', () => {
+    const g = setup('deathmatch');
+    const joined = g.clients[0].last('joined')!;
+    g.tick(MODE_INFO.deathmatch.seconds * 1000);
+    const end = g.clients[0].last('roundEnd')!;
+    const snapshot = g.clients[0].last('snapshot')!;
+    const client = new NetClient(() => undefined, () => undefined);
+    const receive = (m: ServerMessage) => (client as unknown as { receive: (value: ServerMessage) => void }).receive(m);
+    receive(joined);
+    receive({ ...snapshot, seq: 10, match: { ...snapshot.match, ready: [g.ids[0]] } });
+    expect(client.match?.standings).toBeUndefined();
+    receive({ ...end, seq: 9 });
+    expect(client.match?.standings).toEqual(end.match.standings);
+    expect(client.match?.ready).toEqual([g.ids[0]]);
+    receive({ ...snapshot, seq: 11, match: { ...snapshot.match, ready: [g.ids[0], g.ids[1]] } });
+    expect(client.match?.standings).toEqual(end.match.standings);
+    g.room.handle(g.ids[0], { t: 'rematch', round: end.match.round, ready: true });
+    g.room.handle(g.ids[1], { t: 'rematch', round: end.match.round, ready: true });
+    receive({ ...g.clients[0].last('roundStart')!, seq: 12 });
+    receive({ ...end, seq: 13 });
+    expect(client.match).toMatchObject({ phase: 'playing', round: end.match.round + 1 });
+  });
+
+  it('locks deathmatch results before processing a hit after the deadline', () => {
+    const g = setup('deathmatch');
+    g.state(g.ids[0], [0, 0, 0]);
+    g.state(g.ids[1], [0, 0, 8]);
+    g.advance(MODE_INFO.deathmatch.seconds * 1000);
+    g.hit(g.ids[0], g.ids[1]);
+    expect(g.clients[0].last('damage')).toBeUndefined();
+    expect(g.clients[0].last('roundEnd')?.match).toMatchObject({ phase: 'finished', result: 'เสมอกัน!' });
   });
 
   it('ends a free-for-all when someone reaches the KO goal', () => {
@@ -97,6 +178,7 @@ describe('online match lifecycle', () => {
     }
     g.tick();
     expect(g.clients[0].last('snapshot')?.match).toMatchObject({ phase: 'finished', result: 'P1 ชนะ!' });
+    expect(g.clients[0].last('roundEnd')?.match.standings?.[0]).toMatchObject({ name: 'P1', rank: 1, score: MODE_INFO.deathmatch.goal });
     expect(g.clients[0].last('snapshot')?.scores.find((s) => s.id === a)?.score).toBe(MODE_INFO.deathmatch.goal);
   });
 });
@@ -153,6 +235,19 @@ describe('team deathmatch', () => {
 });
 
 describe('control point', () => {
+  it('counts control time up to the deadline before a late state changes the point', () => {
+    const g = setup('control');
+    const [a, b] = g.ids;
+    g.state(a, [CONTROL_POINT.x, 0, CONTROL_POINT.z]);
+    g.state(b, [40, 0, 0]);
+    g.tick(MODE_INFO.control.seconds * 1000 - 500);
+    g.advance(500);
+    g.state(a, [40, 0, 0]);
+    const end = g.clients[0].last('roundEnd')!;
+    expect(end.match.result).toBe('P1 ชนะ!');
+    expect(end.match.standings?.find((p) => p.id === a)?.score).toBeCloseTo(1.5);
+  });
+
   it('awards time only to a sole player inside, pauses when contested, and ends at the goal', () => {
     const g = setup('control');
     const [a, b] = g.ids;
@@ -197,7 +292,12 @@ describe('crown mode', () => {
     expect(g.clients[0].last('snapshot')?.match.holder).toBe(b);
     g.tick(MODE_INFO.crown.seconds * 1000);
     expect(g.clients[0].last('snapshot')?.match).toMatchObject({ phase: 'finished', holder: b, result: 'P2 ชนะ!' });
-    g.tick(ROUND_BREAK_MS);
+    const end = g.clients[0].last('roundEnd')!;
+    expect(end.match.standings?.[0]).toMatchObject({ id: b, rank: 1 });
+    expect(end.match.standings?.find((p) => p.id === a)?.rank).toBeNull();
+    g.room.handle(a, { t: 'rematch', round: end.match.round, ready: true });
+    g.room.handle(b, { t: 'rematch', round: end.match.round, ready: true });
+    g.tick();
     expect(g.clients[0].last('snapshot')?.match).toMatchObject({ phase: 'playing', holder: null, crown: [CROWN_SPAWN.x, CROWN_SPAWN.y, CROWN_SPAWN.z] });
   });
 
@@ -207,6 +307,7 @@ describe('crown mode', () => {
     g.state(g.ids[1], [-40, 0, 0]);
     g.tick(MODE_INFO.crown.seconds * 1000);
     expect(g.clients[0].last('snapshot')?.match).toMatchObject({ phase: 'finished', holder: null, result: 'ไม่มีผู้ชนะ เพราะไม่มีคนถือมงกุฎ' });
+    expect(g.clients[0].last('roundEnd')?.match.standings?.every((p) => p.rank === null)).toBe(true);
   });
 
   it('locks the winner at the deadline before processing a late hit', () => {
