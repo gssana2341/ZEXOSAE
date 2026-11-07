@@ -1137,3 +1137,53 @@ select {
   right: auto;
   left: calc(186px + var(--safe-l));
 }
+
+/* Main menu: one big way in, practice tucked below */
+
+.btn.hero-button {
+  min-height: 62px;
+  font-size: 22px;
+  letter-spacing: 0.02em;
+  box-shadow: 0 6px 24px rgba(31, 214, 196, 0.35);
+}
+
+.btn.subtle {
+  min-height: 38px;
+  font-size: 14px;
+  color: var(--muted);
+  background: transparent;
+}
+
+.panel.main .status {
+  min-height: 1.2em;
+  margin: -4px 0 2px;
+  text-align: center;
+}
+
+.key.watch {
+  min-width: 46px;
+  font-size: 18px;
+}
+
+.room-code-ask {
+  display: flex;
+  gap: 8px;
+  margin: -2px 0 4px;
+}
+
+.room-code-ask input {
+  flex: 1;
+  min-width: 0;
+}
+
+.board-help {
+  margin: -6px 0 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* Watching a room: no body, no buttons, just the view */
+
+.hud.watching :is(.vitals, .skills, .touch, .crosshair, .speed) {
+  display: none !important;
+}

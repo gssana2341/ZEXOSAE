@@ -5,7 +5,7 @@ import type { GameMode } from '../sim/game-modes';
 
 const API = '/api/rooms';
 
-export type NetError = 'not-found' | 'full' | 'busy' | 'no-store' | 'unavailable' | 'connect' | 'network';
+export type NetError = 'not-found' | 'full' | 'busy' | 'no-store' | 'unavailable' | 'connect' | 'network' | 'no-rooms';
 
 export class SignalError extends Error {
   constructor(readonly reason: NetError) {
@@ -31,6 +31,11 @@ async function call<T>(init?: RequestInit): Promise<T> {
 
 const post = <T>(body: object) =>
   call<T>({ method: 'POST', body: JSON.stringify(body) });
+
+/** Relay servers for connecting through networks that block direct links. Empty if none are set up. */
+export async function relayServers(): Promise<RTCIceServer[]> {
+  return (await post<{ iceServers: RTCIceServer[] }>({ action: 'ice' })).iceServers ?? [];
+}
 
 export async function listRooms(): Promise<RoomSummary[]> {
   return (await call<{ rooms: RoomSummary[] }>()).rooms;

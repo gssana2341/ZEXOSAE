@@ -11,7 +11,8 @@ export const WEB = {
   /** Seconds for the whip along the line to die away. */
   settleTime: 0.4,
   /** Seconds a released web stays in the air. */
-  fadeTime: 0.4,
+  /** A let-go web hangs on this long while it drops and thins away. */
+  fadeTime: 1.1,
   fallSpeed: 9,
   segments: 22,
   strands: 3,
@@ -114,12 +115,13 @@ export class WebLine {
   }
 
   /** Call every frame. Without an anchor, the last web falls away on its own. */
-  update(hand: THREE.Vector3, anchor: V3 | null, camera: THREE.Camera, dt: number, width: number): void {
+  update(hand: THREE.Vector3, anchor: V3 | null, camera: THREE.Camera, dt: number, width: number, follow = false): void {
     if (anchor) {
       const moved =
         !this.attached ||
         Math.abs(anchor.x - this.anchor.x) + Math.abs(anchor.y - this.anchor.y) + Math.abs(anchor.z - this.anchor.z) > 0.01;
-      this.age = moved ? 0 : this.age + dt;
+      // Following something in flight, the line is already out: no new shot each frame.
+      this.age = follow ? WEB.settleTime : moved ? 0 : this.age + dt;
       this.attached = true;
       this.loose = -1;
       this.anchor.set(anchor.x, anchor.y, anchor.z);
@@ -136,7 +138,8 @@ export class WebLine {
     this.group.visible = this.attached || this.loose >= 0;
     if (!this.group.visible) return;
 
-    const fade = this.attached ? 1 : 1 - this.loose / WEB.fadeTime;
+    // Holds its width at first, then thins away, so a let-go web lingers instead of vanishing.
+    const fade = this.attached ? 1 : 1 - (this.loose / WEB.fadeTime) ** 2;
     this.draw(camera, width * fade);
 
     const landed = Math.min(1, Math.max(0, (this.age - WEB.shootTime) / 0.12));

@@ -24,7 +24,6 @@ import {
   stepStrike,
   stepWebHold,
   stepZip,
-  tryCrate,
   tryJumpMoves,
   tryMelee,
   type CrateSpot,
@@ -135,6 +134,10 @@ export const TUNING = {
   reelSpeed: 13,
   /** The web lets go this close to its point, so the player flies past it. */
   ropeDetach: 2.2,
+  /** The pull fades out once the web's slope from hand to point drops under this. */
+  pullFadeSlope: 0.35,
+  /** Above its point by this much, a web goes slack and lets go: no looping over the top. */
+  swingOverTop: 0.4,
   /** Inside this distance, the web also lets go once the player is moving away from its point. */
   ropeFlingDistance: 6,
   /** How far the web can stretch past its length before it stops giving. */
@@ -148,6 +151,10 @@ export const TUNING = {
   /** Sideways push from where the camera looks while on the web. */
   lookSteer: 18,
   swingStrafe: 8,
+  /** Sideways push from A and D while on the web, at full lean. */
+  swingSteer: 26,
+  /** How quickly the lean follows A and D. Low, so a swing turns with some weight. */
+  swingSteerEase: 3.2,
   swingReleaseBoost: 2.5,
 
   /** How fast the mouse can bend the flight path while holding forward, in radians per second. */
@@ -311,6 +318,8 @@ export interface Player {
   act: Act | null;
   actT: number;
 
+  /** How far the player leans their swing to the side, from -1 to 1. */
+  swingSteer: number;
   /** Where a web press would zip to or hang from. */
   perch: Perch | null;
   /** Just landed on a perch: a jump now launches off it. */
@@ -343,6 +352,10 @@ export interface Player {
   webTarget: number | null;
   webHoldT: number;
   webPending: boolean;
+  /** When the last tug on a held web went out, in seconds since it started. */
+  tugT: number;
+  /** A crate or car held on the web, by id. */
+  holding: number | null;
   spinT: number;
   spins: number;
   strikeId: number | null;
@@ -369,7 +382,8 @@ export type GameEvent =
   | { type: 'finisher' }
   | { type: 'trick'; kind: number }
   | { type: 'heal'; amount: number }
-  | { type: 'pullCrate'; crate: number };
+  | { type: 'grab'; pickup: number }
+  | { type: 'letGo'; pickup: number; fling: V3 };
 
 export function createPlayer(pos: V3, yaw: number): Player {
   return {
@@ -404,6 +418,7 @@ export function createPlayer(pos: V3, yaw: number): Player {
     targetPreview: null,
     hp: MAX_HP,
     focus: 0,
+    swingSteer: 0,
     act: null,
     actT: 0,
     perch: null,
@@ -432,6 +447,8 @@ export function createPlayer(pos: V3, yaw: number): Player {
     webTarget: null,
     webHoldT: 0,
     webPending: false,
+    tugT: -1,
+    holding: null,
     spinT: 0,
     spins: 0,
     strikeId: null,
@@ -918,9 +935,27 @@ function stepSwingVelocity(p: Player, wish: V3, dt: number): void {
   p.vel.y += (look.y - n.y * along) * T.lookSteer * dt;
   p.vel.z += (look.z - n.z * along) * T.lookSteer * dt + wish.z * T.swingStrafe * dt;
 
+  // A and D lean the whole swing to the side. The lean builds up and dies away
+  // slowly, so the body feels heavy on the line rather than snapping sideways.
+  const right = { x: Math.cos(p.yaw), z: -Math.sin(p.yaw) };
+  const sideways = wish.x * right.x + wish.z * right.z;
+  p.swingSteer += (sideways - p.swingSteer) * (1 - Math.exp(-T.swingSteerEase * dt));
+  const across = right.x * n.x + right.z * n.z;
+  const lx = right.x - n.x * across;
+  const ly = -n.y * across;
+  const lz = right.z - n.z * across;
+  const len = Math.hypot(lx, ly, lz) || 1;
+  const push = p.swingSteer * T.swingSteer * dt;
+  p.vel.x += (lx / len) * push;
+  p.vel.y += (ly / len) * push;
+  p.vel.z += (lz / len) * push;
+
+  // The web pulls up toward its point, never past it: the pull fades out as the body
+  // rises level with the point, so a held web can't whip the player round and round it.
+  const below = Math.min(1, Math.max(0, n.y / T.pullFadeSlope));
   const inward = p.vel.x * n.x + p.vel.y * n.y + p.vel.z * n.z;
-  if (inward < T.pullMaxSpeed) {
-    const add = Math.min(T.pullAccel * dt, T.pullMaxSpeed - inward);
+  if (inward < T.pullMaxSpeed && below > 0) {
+    const add = Math.min(T.pullAccel * below * dt, T.pullMaxSpeed - inward);
     p.vel.x += n.x * add;
     p.vel.y += n.y * add;
     p.vel.z += n.z * add;
@@ -1154,7 +1189,7 @@ export function stepPlayer(
   }
   stepAttackHold(p, input, ctx, dt);
 
-  if (p.stunT === 0 && input.snare && !(target === null && tryCrate(p, ctx)) && p.snareCdT === 0) {
+  if (p.stunT === 0 && input.snare && p.snareCdT === 0) {
     fire(p, target, true, events);
     p.snareCdT = T.snareCooldown;
   }
@@ -1317,7 +1352,8 @@ export function stepPlayer(
 
   if (p.mode === 'swing') {
     const dist = applyRope(p, map, dt);
-    if (dist < T.ropeDetach || (dist < T.ropeFlingDistance && isFlyingPast(p, dist))) {
+    const overTop = p.anchor !== null && handPosition(p).y > p.anchor.y + T.swingOverTop;
+    if (overTop || dist < T.ropeDetach || (dist < T.ropeFlingDistance && isFlyingPast(p, dist))) {
       p.swingLatchT = T.ropeReattach;
       releaseSwing(p, events);
     }
@@ -1335,12 +1371,13 @@ export function stepPlayer(
   if (p.mode === 'zip' && p.zipTarget) {
     const t = p.zipTarget;
     const flat = Math.hypot(t.x - p.pos.x, t.z - p.pos.z);
-    if (p.pos.y >= t.y - 0.1 && flat < MOVES.pointZipArrive) {
-      // Step onto the ledge itself, not the air just short of it.
-      if (spaceIsFree(map, p, t.x, t.y, t.z, T.standHeight)) p.pos = { ...t };
-      else p.pos.y = Math.max(p.pos.y, t.y);
-      p.mode = 'ground';
-      p.vel = { x: 0, y: 0, z: 0 };
+    if (p.pos.y >= t.y + 0.1 && flat < MOVES.pointZipArrive) {
+      // Pop up over the edge and land with a little of the zip's run left in the legs,
+      // rather than freezing on the spot.
+      const speed = Math.min(MOVES.pointZipCarry, Math.hypot(p.vel.x, p.vel.z));
+      const dir = flat > 0.01 ? { x: (t.x - p.pos.x) / flat, z: (t.z - p.pos.z) / flat } : viewForward(p.yaw, 0);
+      p.vel = { x: dir.x * speed, y: MOVES.pointZipHop, z: dir.z * speed };
+      p.mode = 'air';
       p.zipTarget = null;
       p.webLine = null;
       p.perchT = MOVES.pointLaunchWindow;

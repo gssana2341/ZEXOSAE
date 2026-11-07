@@ -104,11 +104,38 @@ export class NetClient {
     });
   }
 
+  /**
+   * Joins a random open public room that already has people in it. Throws a
+   * 'no-rooms' error when there is none, rather than making one.
+   */
+  async joinRandom(name: string): Promise<void> {
+    this.close();
+    const attempt = this.attempt;
+    const rooms = (await listRooms()).filter((room) => !room.private && room.code && room.players < room.max);
+    if (attempt !== this.attempt) return;
+    if (!rooms.length) throw new SignalError('no-rooms');
+    for (let i = rooms.length - 1; i > 0; i -= 1) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [rooms[i], rooms[j]] = [rooms[j], rooms[i]];
+    }
+    let last: unknown = new SignalError('no-rooms');
+    for (const room of rooms.slice(0, 3)) {
+      try {
+        await this.join(room.code, name);
+        return;
+      } catch (error) {
+        if (!(error instanceof SignalError) || !['full', 'not-found', 'connect'].includes(error.reason)) throw error;
+        last = error;
+      }
+    }
+    throw last;
+  }
+
   /** Join a random open public room, or host a random mode if none is available. */
   async quickPlay(name: string): Promise<void> {
     this.close();
     let attempt = this.attempt;
-    const rooms = (await listRooms()).filter((room) => room.players < room.max);
+    const rooms = (await listRooms()).filter((room) => !room.private && room.code && room.players < room.max);
     if (attempt !== this.attempt) return;
     // Shuffle without trusting the room board's ordering to be random.
     for (let i = rooms.length - 1; i > 0; i -= 1) {
@@ -158,7 +185,10 @@ export class NetClient {
     if (attempt === this.attempt) throw new SignalError('connect');
   }
 
-  async join(rawCode: string, name: string): Promise<void> {
+  /** True while this player only watches the room. */
+  watching = false;
+
+  async join(rawCode: string, name: string, watch = false): Promise<void> {
     this.close();
     const attempt = this.attempt;
     const code = cleanCode(rawCode);
@@ -206,7 +236,7 @@ export class NetClient {
         reject: (error) => { window.clearTimeout(timer); reject(error); },
       };
     });
-    this.send({ t: 'join', code, name });
+    this.send({ t: 'join', code, name, watch });
     try {
       await joined;
     } catch (error) {
@@ -274,6 +304,7 @@ export class NetClient {
       case 'joined':
         this.id = m.id;
         this.code = m.code;
+        this.watching = m.watching === true;
         for (const p of m.players) this.players.set(p.id, p);
         this.match = m.match && isGameMode(m.match.mode) ? m.match : null;
         break;

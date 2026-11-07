@@ -95,7 +95,7 @@ export class HostSession {
         return;
       }
       if (playerId !== null) return;
-      playerId = this.room.add(client, message.name);
+      playerId = message.watch ? this.room.watch(client) : this.room.add(client, message.name);
       if (playerId === null) client.send({ t: 'error', reason: 'full' });
       else this.beat();
     };

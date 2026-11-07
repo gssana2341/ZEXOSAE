@@ -111,7 +111,38 @@ function pause(): void {
   menus.showPause();
 }
 
+/** Only watching a room: no body, no input, the camera follows one player after another. */
+let watching = false;
+let watchIndex = 0;
+
+function setWatching(on: boolean): void {
+  watching = on;
+  watchIndex = 0;
+  view.watching = on;
+  hud.setWatching(on);
+}
+
+/** Puts the camera on the followed player. A click or Space moves on to the next one, Shift back. */
+function followWatched(): void {
+  const alive = world.dummies.filter((d) => d.respawnT === 0);
+  const s = input.sample();
+  if (s.shoot || s.jump) watchIndex += 1;
+  if (s.dash) watchIndex -= 1;
+  const p = world.player;
+  if (!alive.length) {
+    hud.watching = 'ยังไม่มีใครเล่นอยู่ในห้องนี้ · Esc เพื่อออก';
+    return;
+  }
+  const target = alive[((watchIndex % alive.length) + alive.length) % alive.length];
+  prevPos = { ...target.pos };
+  p.pos = { ...target.pos };
+  p.vel = { x: 0, y: 0, z: 0 };
+  p.mode = 'air';
+  hud.watching = `กำลังดู ${target.name ?? 'ผู้เล่น'} · คลิกหรือ Space เปลี่ยนคน · Esc เพื่อออก`;
+}
+
 function backToMenu(): void {
+  setWatching(false);
   state = 'menu';
   setKoBy(null);
   input.enabled = false;
@@ -135,7 +166,8 @@ const NET_ERRORS: Record<NetError, string> = {
   busy: 'ระบบห้องไม่ว่าง ลองอีกครั้งภายหลัง',
   'no-store': 'ระบบห้องยังไม่พร้อม ต้องเชื่อม Redis ใน Vercel ก่อน',
   unavailable: 'ระบบห้องขัดข้องชั่วคราว กรุณาลองอีกครั้ง',
-  connect: 'เชื่อมต่อกับเจ้าของห้องไม่ได้ เครือข่ายอาจบล็อกการต่อตรง',
+  connect: 'ต่อกับเจ้าของห้องไม่ได้ มักเกิดเมื่อเล่นใน Wi-Fi เดียวกันหรือเน็ตมือถือบางเจ้า ลองใหม่อีกครั้ง หรือให้เจ้าของเกมเปิดเซิร์ฟเวอร์ส่งต่อ (TURN)',
+  'no-rooms': 'ตอนนี้ยังไม่มีห้องที่มีคนเล่นอยู่ สร้างห้องเองหรือซ้อมคนเดียวก่อนได้',
   network: 'ติดต่อระบบห้องไม่ได้ เช็กอินเทอร์เน็ตแล้วลองใหม่',
 };
 
@@ -148,8 +180,9 @@ function onNetMessage(m: ServerMessage): void {
       lobby.stop();
       world.setOnline(true);
       spawnAt(m.pos, m.yaw);
+      setWatching(m.watching === true);
       play();
-      hud.toast(`ห้อง ${m.code}`);
+      hud.toast(m.watching ? `กำลังดูห้อง ${m.code}` : `ห้อง ${m.code}`);
       break;
     case 'roundStart': {
       const spawn = m.spawns.find((s) => s.id === net.id);
@@ -261,6 +294,15 @@ const menus = new Menus(uiRoot, settings, profile, {
     rememberName(name);
     menus.onlineStatus('กำลังสร้างห้อง…');
     net.create(name, maxPlayers, mode, privateRoom).catch((error) => menus.onlineStatus(netMessage(error)));
+  },
+  playNow() {
+    menus.onlineStatus('กำลังหาห้องที่มีคนเล่นอยู่…');
+    net.joinRandom(profile.name || 'ผู้เล่น').catch((error) => menus.onlineStatus(netMessage(error)));
+  },
+  watchRoom(code, name) {
+    rememberName(name);
+    menus.onlineStatus('กำลังเข้าไปดู อาจใช้เวลาสักครู่…');
+    net.join(code, name, true).catch((error) => menus.onlineStatus(netMessage(error)));
   },
   quickPlay(name) {
     rememberName(name);
@@ -447,7 +489,14 @@ function frame(now: number): void {
           : world.gameMode === 'crown' && net.match?.crown ? toV3(net.match.crown) : null;
     }
 
-    accumulator += dt;
+    if (watching) {
+      followWatched();
+      world.stepWatching(dt);
+      accumulator = 0;
+      world.events.length = 0;
+    }
+
+    accumulator += watching ? 0 : dt;
     while (accumulator >= TICK) {
       const p = world.player;
       prevPos = { ...p.pos };
@@ -457,7 +506,7 @@ function frame(now: number): void {
       accumulator -= TICK;
     }
     handleEvents();
-    if (world.online) sendState(dt);
+    if (world.online && !watching) sendState(dt);
   }
 
   const renderDt = frameLimiter.advance(dt);

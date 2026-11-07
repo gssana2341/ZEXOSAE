@@ -251,6 +251,40 @@ const RELEASE_SHAPES = [
   { legs: both(bend(0.45, -1, 0.1, 0.4, -1, 0.25)), arms: both(bend(1, 0.35, 0.1, 1, 0.5, 0.05)) },
 ];
 
+/** Falling faster than this starts a dive, and the dive is full this much faster. */
+export const DIVE_FROM = 12;
+export const DIVE_RANGE = 10;
+
+/** How far into a dive a fall is, from 0 to 1. Only a free fall dives. */
+export function diveAmount(fallSpeed: number): number {
+  return Math.min(1, Math.max(0, (fallSpeed - DIVE_FROM) / DIVE_RANGE));
+}
+
+/**
+ * How far to tip the body so its head leads along the fall. Straight down tips it
+ * fully over. Falling forward as well, the body lies along that slant instead.
+ */
+export function diveTilt(fallSpeed: number, forwardSpeed: number): number {
+  return Math.atan2(-Math.max(0, forwardSpeed), -Math.max(0.01, fallSpeed));
+}
+
+/**
+ * Head first, streamlined: arms swept back along the sides, legs straight and together,
+ * the way a skydiver tucks in to drop faster. Directions are in the tipped body's frame,
+ * so "down" here runs toward the feet.
+ */
+export function diveLimbs(time: number): LimbPose {
+  // A small flutter, from the wind.
+  const f = Math.sin(time * 19) * 0.03;
+  return {
+    armRight: bend(0.24, -0.94, 0.24 + f, 0.12, -0.97, 0.2),
+    armLeft: mirror(bend(0.24, -0.94, 0.24 - f, 0.12, -0.97, 0.2)),
+    legRight: bend(0.05, -1, 0.06 - f, 0.03, -1, 0.14),
+    legLeft: mirror(bend(0.05, -1, 0.06 + f, 0.03, -1, 0.14)),
+    twoHands: false,
+  };
+}
+
 export function releaseLimbs(kind: number): LimbPose {
   const shape = RELEASE_SHAPES[kind % RELEASE_MOVES];
   return {

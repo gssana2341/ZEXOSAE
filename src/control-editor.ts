@@ -9,7 +9,7 @@ const CONTROLS: Array<{ id: ControlId; className: string; label: string }> = [
   { id: 'attack', className: 'pad pad-attack', label: 'ตี' },
   { id: 'dash', className: 'pad pad-small pad-dash', label: 'พุ่ง' },
   { id: 'snare', className: 'pad pad-small pad-snare', label: 'ใยรัด' },
-  { id: 'web', className: 'pad pad-small pad-web', label: 'ใยพุ่ง' },
+  { id: 'web', className: 'pad pad-small pad-web', label: 'ใยดึง' },
   { id: 'focus', className: 'pad pad-small pad-focus', label: 'โฟกัส' },
   { id: 'pause', className: 'pause-button', label: 'ตั้งค่า' },
   { id: 'scores', className: 'scores-button', label: 'คะแนน' },

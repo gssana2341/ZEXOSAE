@@ -37,14 +37,17 @@ describe('rooms', () => {
   it('lists rooms without revealing the host key', async () => {
     const { post, list } = api();
     const { body } = await post({ action: 'create', host: 'Host', max: 6 });
-    expect(await list()).toEqual([{ code: body.code, host: 'Host', players: 1, max: 6, mode: 'deathmatch' }]);
+    expect(await list()).toEqual([{ code: body.code, host: 'Host', players: 1, max: 6, mode: 'deathmatch', private: false }]);
   });
 
-  it('lists the selected mode for public rooms and keeps private rooms off the board', async () => {
+  it("lists every room with its mode, but never a private room's code", async () => {
     const { post, list } = api();
     const publicRoom = await post({ action: 'create', host: 'Public', mode: 'control' });
     const privateRoom = await post({ action: 'create', host: 'Friends', mode: 'crown', private: true });
-    expect(await list()).toEqual([{ code: publicRoom.body.code, host: 'Public', players: 1, max: 8, mode: 'control' }]);
+    const rooms = await list();
+    expect(rooms).toContainEqual({ code: publicRoom.body.code, host: 'Public', players: 1, max: 8, mode: 'control', private: false });
+    expect(rooms).toContainEqual({ code: '', host: 'Friends', players: 1, max: 8, mode: 'crown', private: true });
+    expect(JSON.stringify(rooms)).not.toContain(privateRoom.body.code);
     expect((await post({ action: 'send', to: `h:${privateRoom.body.code}`, data: 'offer' })).status).toBe(200);
     expect((await post({ action: 'create', host: 'Bad', mode: 'unknown' })).status).toBe(400);
     expect((await post({ action: 'create', host: 'Bad', mode: 'race' })).status).toBe(400);
@@ -206,6 +209,31 @@ describe('deployed Node function', () => {
     } finally {
       await unlink(file);
       await rmdir(directory);
+    }
+  });
+});
+
+describe('relay servers', () => {
+  it('has none until they are set up, and the game still connects directly', async () => {
+    const { post } = api();
+    const { status, body } = await post({ action: 'ice' });
+    expect(status).toBe(200);
+    expect(body.iceServers).toEqual([]);
+  });
+
+  it('hands out fixed relay servers from the settings', async () => {
+    process.env.TURN_URLS = 'turn:relay.example.com:3478, turns:relay.example.com:443';
+    process.env.TURN_USERNAME = 'user';
+    process.env.TURN_CREDENTIAL = 'secret';
+    try {
+      const { body } = await api().post({ action: 'ice' });
+      expect(body.iceServers).toEqual([
+        { urls: ['turn:relay.example.com:3478', 'turns:relay.example.com:443'], username: 'user', credential: 'secret' },
+      ]);
+    } finally {
+      delete process.env.TURN_URLS;
+      delete process.env.TURN_USERNAME;
+      delete process.env.TURN_CREDENTIAL;
     }
   });
 });

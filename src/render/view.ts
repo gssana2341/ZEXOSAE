@@ -11,6 +11,9 @@ import {
   type ClipMode,
   RELEASE_TIME,
   hangLimbs,
+  diveAmount,
+  diveLimbs,
+  diveTilt,
   releaseLimbs,
   releaseTurn,
   swingLimbs,
@@ -25,7 +28,9 @@ import { createCameraMotion, landCamera, stepCameraMotion } from './camera-motio
 import { createChaseCamera, resetChaseCamera, stepChaseCamera } from './chase-camera';
 import type { FirstPersonArms, HeroBody } from './hero';
 import { buildCharacter, paintCharacter, paletteFor, PALETTES, type CharacterView } from './character';
-import { WebPuffs } from './web-line';
+import { WebLine, WebPuffs } from './web-line';
+import { Streets } from './streets';
+import { Lighting } from './lighting';
 import { pixelRatioFor, QUALITY, yieldToBrowser } from './performance';
 import { preloadScenes } from './preload';
 import { ARENA_LIMIT, JUMP_PAD_RADIUS, raycast, RING_RADIUS, type GameMap, type V3 } from '../sim/map';
@@ -33,12 +38,32 @@ import type { HitKind } from '../sim/hits';
 import { CONTROL_POINT, type Team } from '../sim/game-modes';
 import { ACT_TIME } from '../sim/moves';
 import { climbWallNormal, eyePosition, poseOf, totalSpeed, TUNING, webLineOf, type Dummy, type Player } from '../sim/player';
-import type { World } from '../sim/world';
+import type { Shot, World } from '../sim/world';
 import type { Settings } from '../settings';
 
 const UP = new THREE.Vector3(0, 1, 0);
 const MAX_SHOTS = 12;
+/** Web strands behind shots that can show at once, flying or fading. */
+const MAX_STRANDS = 8;
+/**
+ * The closest the world camera draws. Depth precision runs out far away, and
+ * the nearer this is, the sooner: at 0.15 m, distant roofs flickered. The arms
+ * have their own camera, so nothing the player needs is this close.
+ */
+const NEAR_PLANE = 0.3;
 const MAX_FLYING_CRATES = 4;
+/** A dive turns feet first when the ground is less than this many seconds away. */
+const LAND_LOOKAHEAD = 0.5;
+const DOWN = new THREE.Vector3(0, -1, 0);
+/** Two hands on a swinging web: measured up the web from just over the shoulders. */
+const SWING_GRIP_HEIGHT = 1.45;
+const SWING_GRIP_HIGH = 0.72;
+const SWING_GRIP_LOW = 0.5;
+/** The view starts to tremble past this falling speed, and reaches full strength this much faster. */
+const SHAKE_FROM = 14;
+const SHAKE_RANGE = 26;
+/** The most the camera moves when shaking, in metres. */
+const SHAKE_SIZE = 0.07;
 /** Where the hands hold a line, in metres above the feet: one above the head, one higher. */
 const GRIP_LOW = 1.98;
 const GRIP_HIGH = 2.18;
@@ -124,13 +149,15 @@ function buildCrown(): THREE.Group {
 }
 
 export class GameView {
-  readonly camera = new THREE.PerspectiveCamera(90, 1, 0.15, 2600);
+  readonly camera = new THREE.PerspectiveCamera(90, 1, NEAR_PLANE, 2600);
   /** All city and character assets are ready before the player enters the game. */
   readonly ready: Promise<void>;
 
   private readonly renderer: THREE.WebGLRenderer;
   private readonly scene = new THREE.Scene();
   private readonly sun = new THREE.DirectionalLight('#ffd2a0', 3);
+  private readonly hemi = new THREE.HemisphereLight('#dbe2ff', '#a08088', 2.4);
+  private lighting!: Lighting;
   private readonly rings: THREE.Mesh[] = [];
   private readonly ringNext = new THREE.MeshBasicMaterial({ color: '#ff8a2b' });
   private readonly crown = buildCrown();
@@ -142,7 +169,13 @@ export class GameView {
   private readonly padRings: THREE.Mesh[] = [];
   private readonly padFlash: number[] = [];
   private readonly puffs = new WebPuffs();
+  private streets: Streets | null = null;
+  private trafficShown: string | null = null;
+  /** Only watching a room: the camera follows another player and this body is hidden. */
+  watching = false;
   private readonly gripPoint = new THREE.Vector3();
+  /** Strands behind web shots, reused. */
+  private readonly strands: Array<{ web: WebLine; shot: Shot | null; origin: THREE.Vector3 }> = [];
   private readonly crateMeshes: THREE.Mesh[] = [];
   private readonly flyingCrates: THREE.Mesh[] = [];
   private readonly shockwave: THREE.Mesh;
@@ -200,7 +233,7 @@ export class GameView {
 
     this.scene.background = new THREE.Color(FOG_COLOR);
     this.scene.fog = new THREE.Fog(FOG_COLOR, 220, 1100);
-    this.scene.add(new THREE.HemisphereLight('#dbe2ff', '#a08088', 2.4));
+    this.scene.add(this.hemi);
 
     this.sun.position.copy(SUN_DIRECTION).multiplyScalar(850);
     this.sun.shadow.camera.left = -ARENA_LIMIT - 20;
@@ -209,10 +242,25 @@ export class GameView {
     this.sun.shadow.camera.bottom = -ARENA_LIMIT - 20;
     this.sun.shadow.camera.far = 1800;
     this.sun.shadow.bias = -0.0006;
+    // One shadow texel covers about a metre of this city. Without pushing the lookup out
+    // along the surface normal, tall walls catch their own shadow in bands that shimmer
+    // as the camera moves.
+    this.sun.shadow.normalBias = 0.9;
     this.scene.add(this.sun);
 
     const arena = buildArena(map);
     this.scene.add(arena.group);
+    this.lighting = new Lighting(this.scene, this.sun, this.hemi, this.renderer);
+    this.scene.add(this.lighting.group);
+    this.lighting.lit.windows.push(arena.windows);
+    this.lighting.lit.far.push(arena.far);
+    this.lighting.lit.clouds.push(arena.clouds);
+    this.lighting.lit.land.push(arena.land);
+    if (map.scenery) {
+      this.streets = new Streets(map.scenery);
+      this.scene.add(this.streets.group);
+      this.lighting.lit.lamps.push((on) => this.streets?.setLights(on));
+    }
 
     const ringGeometry = new THREE.TorusGeometry(RING_RADIUS - 0.6, 0.16, 8, 40);
     const makeRings = (points: V3[], destination: THREE.Mesh[]) => points.forEach((pos, i) => {
@@ -258,6 +306,11 @@ export class GameView {
     }
 
     this.scene.add(this.puffs.group);
+    for (let i = 0; i < MAX_STRANDS; i += 1) {
+      const web = new WebLine();
+      this.strands.push({ web, shot: null, origin: new THREE.Vector3() });
+      this.scene.add(web.group);
+    }
 
     // Loose crates: wooden boxes the web can fetch and throw.
     const crateGeometry = new THREE.BoxGeometry(CRATE_SIZE, CRATE_SIZE, CRATE_SIZE);
@@ -364,13 +417,22 @@ export class GameView {
   /** Swaps in the complete Kenney city before the loading screen closes. */
   private async loadCity(map: GameMap, placeholders: THREE.Object3D[]): Promise<void> {
     const { loadKenneyCity } = await import('./kenney');
-    const { city, far } = await loadKenneyCity(map, this.renderer.capabilities.getMaxAnisotropy());
+    const { city, far, walls, farMaterial } = await loadKenneyCity(map, this.renderer.capabilities.getMaxAnisotropy());
     this.scene.add(city, far);
+    this.lighting.lit.glass.push(walls);
+    this.lighting.lit.far.push(farMaterial);
+    this.lighting.refresh();
     for (const mesh of placeholders) mesh.visible = false;
     this.renderer.shadowMap.needsUpdate = true;
   }
 
   applySettings(): void {
+    this.lighting.set(this.settings.timeOfDay);
+    if (this.streets && this.settings.traffic !== this.trafficShown) {
+      this.trafficShown = this.settings.traffic;
+      this.streets.setTraffic(this.settings.traffic);
+    }
+    this.streets?.setGlow(this.settings.cityGlow);
     const q = QUALITY[this.settings.quality];
     const shadows = q.shadow > 0;
     this.renderer.shadowMap.enabled = shadows;
@@ -424,6 +486,24 @@ export class GameView {
     this.roll += Math.min(0.2, speed * 0.006) * (Math.random() < 0.5 ? -1 : 1);
   }
 
+/**
+   * Diving fast, the whole view trembles, harder the faster the drop, like wind
+   * buffeting a camera. Swinging and running stay steady. Smooth noise rather than
+   * random jumps, so it never jerks.
+   */
+  private shakeWhileDiving(fallSpeed: number): void {
+    const k = Math.min(1, Math.max(0, (fallSpeed - SHAKE_FROM) / SHAKE_RANGE));
+    if (k === 0) return;
+    const t = this.time;
+    const wobble = (a: number, b: number, c: number) => Math.sin(t * a) * 0.5 + Math.sin(t * b + 1.3) * 0.3 + Math.sin(t * c + 2.1) * 0.2;
+    const size = k * k * SHAKE_SIZE;
+    const right = this.tmp.set(1, 0, 0).applyQuaternion(this.camera.quaternion);
+    const up = this.tmp2.set(0, 1, 0).applyQuaternion(this.camera.quaternion);
+    this.camera.position.addScaledVector(right, wobble(31, 47, 67) * size).addScaledVector(up, wobble(37, 53, 71) * size);
+    this.camera.rotateZ(wobble(23, 41, 59) * size * 0.25);
+    this.camera.updateMatrixWorld(true);
+  }
+
   /** A landed hit: a hand thrown out, and the bigger hits shake the view. */
   punch(kind: HitKind): void {
     this.recoil();
@@ -474,6 +554,8 @@ export class GameView {
     this.self.web.clear();
     this.camera.updateMatrixWorld(true);
     this.syncWorld(world, dt);
+    this.streets?.update();
+    this.lighting.update(dt);
     this.renderer.render(this.scene, this.camera);
   }
 
@@ -512,7 +594,7 @@ export class GameView {
     });
     const sway = this.settings.reduceMotion ? 0 : 1;
 
-    const third = this.settings.thirdPerson;
+    const third = this.settings.thirdPerson || this.watching;
     if (third) {
       const head = { x: this.camera.position.x, y: this.camera.position.y, z: this.camera.position.z };
       const body = this.self;
@@ -521,7 +603,7 @@ export class GameView {
         head,
         yaw,
         pitch,
-        speed: totalSpeed(p),
+        speed: this.settings.speedZoom ? totalSpeed(p) : 0,
         sideSpeed,
         swinging: p.mode === 'swing',
         dt,
@@ -531,6 +613,13 @@ export class GameView {
       this.camera.rotation.set(pitch, yaw, this.chase.roll * sway);
     } else {
       this.camera.rotation.set(pitch, yaw, this.roll + offset.roll * sway);
+      const flip = this.self.swing;
+      if (this.settings.cameraFlips && !reduce && flip.release >= 0) {
+        // The same turn the body makes in third person, seen from inside it.
+        const turn = releaseTurn(flip.kind, flip.release / RELEASE_TIME);
+        this.camera.rotateX(turn.pitch);
+        this.camera.rotateZ(turn.spin);
+      }
       // Moves the camera along its own right and up, so the sway follows the view.
       this.camera.position.x += Math.cos(yaw) * offset.x * sway;
       this.camera.position.z -= Math.sin(yaw) * offset.x * sway;
@@ -539,12 +628,13 @@ export class GameView {
 
     const speed = totalSpeed(p);
     // A wide view shrinks the hero on screen, so third person widens far less with speed.
-    const maxBoost = reduce ? 4 : third ? 6 : 20;
-    const boostTarget = Math.min(maxBoost, Math.max(0, speed - 11) * (reduce ? 0.15 : third ? 0.2 : 0.7));
+    const maxBoost = reduce ? 4 : third ? 14 : 20;
+    const boostTarget = this.settings.speedZoom ? Math.min(maxBoost, Math.max(0, speed - 11) * (reduce ? 0.15 : third ? 0.45 : 0.7)) : 0;
     this.fovBoost += (boostTarget - this.fovBoost) * blend(6);
     const baseFov = third ? Math.min(this.settings.fov, THIRD_PERSON_FOV) : this.settings.fov;
     this.camera.fov = baseFov + this.fovBoost;
     this.camera.updateProjectionMatrix();
+    if (!reduce && this.settings.screenShake) this.shakeWhileDiving(p.mode === 'air' || p.mode === 'pound' ? -p.vel.y : 0);
 
     const blocks = !third && !this.arms;
     this.armLeft.visible = blocks;
@@ -557,6 +647,9 @@ export class GameView {
     if (!third) this.poseFirstPersonArms(p, speed, blend(13), dt);
     this.drawWeb(p, dt);
     this.drawShots(world);
+    this.drawShotStrands(world, third, dt);
+    this.streets?.update();
+    this.lighting.update(dt);
     this.drawCrates(world, dt);
     this.puffs.update(this.camera, dt);
 
@@ -574,6 +667,11 @@ export class GameView {
   /** Shows the player's own body in third person, facing where they're heading. */
   private syncSelf(p: Player, third: boolean, yaw: number, dt: number, team: Team | undefined): void {
     const view = this.self;
+    if (this.watching) {
+      view.group.visible = false;
+      view.web.clear();
+      return;
+    }
     const pose = poseOf(p);
     const anchor = swingAnchor(webLineOf(p), p.mode, pose);
     const canFlip = p.mode === 'air' && pose === 'air' && p.snareT === 0;
@@ -637,7 +735,8 @@ export class GameView {
       actionProgress: p.act ? 1 - p.actT / ACT_TIME[p.act] : 0,
     };
     this.arms.update(this.armPoseFor(moment), ease);
-    this.kick = Math.max(0, this.kick - dt * 6);
+    // Slower than the third-person body, so the snap of a shot reads in first person.
+    this.kick = Math.max(0, this.kick - dt * 3.5);
   }
 
   /** Where the web leaves the player's hand, in world space. */
@@ -882,7 +981,19 @@ export class GameView {
     // Hanging on a line, the body hangs straight under it.
     const hanging = motion === 'hang' && d.anchor !== null && d.anchor !== undefined;
     const lean = d.anchor && (motion === 'swing' || motion === 'zip' || motion === 'strike');
-    const want = { x: lean ? pose.pitch : turn?.pitch ?? 0, y: turn?.spin ?? 0, z: lean ? pose.roll : 0 };
+
+    // A fast free fall tips the body over, head first along the fall.
+    const fall = -view.velocity.y;
+    const free = (motion === 'air' || motion === undefined) && !d.anchor && !moving && d.snareT === 0;
+    // Close to the ground the body rights itself, feet first, ready to land: never a
+    // header into the pavement.
+    const ground = free && fall > 0 ? raycast(this.map, { x: d.pos.x, y: d.pos.y + 0.2, z: d.pos.z }, DOWN, fall * LAND_LOOKAHEAD + 2) : null;
+    const diving = free && !ground ? diveAmount(fall) : 0;
+    view.dive += (diving - view.dive) * (1 - Math.exp(-(diving > view.dive ? 4 : 14) * dt));
+    const forward = -this.tmp2.copy(view.velocity).applyAxisAngle(UP, -view.group.rotation.y).z;
+    const dive = view.dive > 0.01 ? diveTilt(fall, forward) * view.dive : 0;
+
+    const want = { x: lean ? pose.pitch : turn?.pitch ?? dive, y: turn?.spin ?? 0, z: lean ? pose.roll : 0 };
     const k = 1 - Math.exp(-20 * dt);
     const tilt = view.tilt;
     tilt.x += shortestTurn(want.x - tilt.x) * k;
@@ -903,6 +1014,8 @@ export class GameView {
       limbs = hangLimbs(view.ropePhase, Math.min(1, climb / 2));
     } else if (moving && swing.release < RELEASE_TIME * 0.82) {
       limbs = releaseLimbs(swing.kind);
+    } else if (view.dive > 0.3) {
+      limbs = diveLimbs(this.time);
     }
     hero.holdLimbs(frozen ? null : limbs, dt);
 
@@ -933,6 +1046,18 @@ export class GameView {
       ? this.tmp2.set(d.anchor.x - d.pos.x, d.anchor.y - d.pos.y - 1.4, d.anchor.z - d.pos.z).normalize()
       : null;
     const twoHands = (motion === 'swing' && limbs?.twoHands === true) || hanging;
+    if (twoHands && d.anchor && !frozen) {
+      const a = d.anchor;
+      const rope = this.tmp2.set(d.pos.x - a.x, d.pos.y + SWING_GRIP_HEIGHT - a.y, d.pos.z - a.z);
+      const length = rope.length();
+      rope.normalize();
+      for (const side of [1, -1] as const) {
+        const along = side === swing.side ? SWING_GRIP_HIGH : SWING_GRIP_LOW;
+        hero.reachFor(side, null, dt);
+        hero.gripAt(side, this.gripPoint.set(a.x, a.y, a.z).addScaledVector(rope, Math.max(0.2, length - along)), dt);
+      }
+      return;
+    }
     const shooter = web ? (-swing.side as Side) : this.kickSide;
     for (const side of [1, -1] as const) {
       const holding = web && (side === swing.side || twoHands);
@@ -951,6 +1076,29 @@ export class GameView {
     if (this.shotPuff) {
       this.shotPuff = false;
       this.puffs.fire(this.webStart(third, this.kickSide, this.tmp), WEB_COLOR);
+    }
+  }
+
+  /**
+   * Each web shot pulls a strand out behind it, from the hand to the shot. When the
+   * shot lands or runs out, the strand stays a moment, drops and fades.
+   */
+  private drawShotStrands(world: World, third: boolean, dt: number): void {
+    const live = world.shots.filter((shot) => !shot.snare && !shot.crate);
+    for (const shot of live) {
+      if (this.strands.some((s) => s.shot === shot)) continue;
+      const free = this.strands.find((s) => !s.shot && !s.web.group.visible) ?? this.strands.find((s) => !s.shot);
+      if (!free) continue;
+      free.shot = shot;
+      if (shot.ghost) {
+        free.origin.set(shot.pos.x - shot.dir.x * shot.travelled, shot.pos.y - shot.dir.y * shot.travelled, shot.pos.z - shot.dir.z * shot.travelled);
+      } else {
+        this.webStart(third, this.kickSide, free.origin);
+      }
+    }
+    for (const s of this.strands) {
+      if (s.shot && !live.includes(s.shot)) s.shot = null;
+      s.web.update(s.origin, s.shot ? s.shot.pos : null, this.camera, dt, s.shot?.ghost ? OTHER_WEB_WIDTH * 0.6 : OWN_WEB_WIDTH * 0.7, true);
     }
   }
 
@@ -985,13 +1133,23 @@ export class GameView {
   }
 
   private drawCrates(world: World, dt: number): void {
+    const crates = world.crates;
     this.crateMeshes.forEach((mesh, i) => {
-      const crate = world.crates[i];
-      mesh.visible = crate !== undefined && crate.state !== 'gone';
-      if (!crate || !mesh.visible) return;
-      mesh.position.set(crate.pos.x, crate.pos.y + CRATE_SIZE / 2, crate.pos.z);
-      mesh.rotation.y = crate.state === 'pulled' ? this.time * 12 : (i * 0.7) % Math.PI;
+      const crate = crates[i];
+      mesh.visible = crate !== undefined;
+      if (!crate) return;
+      // Fading out before it goes home: it shrinks away rather than popping.
+      const size = crate.state === 'gone' ? Math.max(0.01, crate.t / 0.6) : 1;
+      mesh.scale.setScalar(size);
+      mesh.position.set(crate.pos.x, crate.pos.y + (CRATE_SIZE / 2) * size, crate.pos.z);
+      mesh.rotation.set(crate.spin * 0.7, (i * 0.7) % Math.PI + crate.spin, 0);
     });
+    if (this.streets) {
+      for (const thing of world.pickups) {
+        if (thing.car === undefined) continue;
+        this.streets.placeCar(thing.car, thing.state === 'idle' ? null : thing.pos, thing.spin, thing.state === 'gone' ? Math.max(0.01, thing.t / 0.6) : 1);
+      }
+    }
 
     this.shockT = Math.max(0, this.shockT - dt);
     this.shockwave.visible = this.shockT > 0;

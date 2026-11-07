@@ -70,8 +70,13 @@ function info(p: RoomPlayer): PlayerInfo {
 const distance = (a: Vec, b: Vec) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
 const toVec = (spawn: (typeof SPAWNS)[number]): Vec => [spawn.pos.x, spawn.pos.y, spawn.pos.z];
 
+/** Rooms take this many watchers on top of their players. */
+export const MAX_WATCHERS = 8;
+
 export class Room {
   private readonly players = new Map<number, RoomPlayer>();
+  /** People who only watch: every update reaches them, but they never spawn, score or get hit. */
+  private readonly watchers = new Map<number, Client>();
   private nextId = 1;
   private snapshotSeq = 0;
   private phase: MatchState['phase'] = 'waiting';
@@ -153,7 +158,32 @@ export class Room {
     return player.id;
   }
 
+  /** Lets someone in to watch. Null when the room has all the watchers it takes. */
+  watch(client: Client): number | null {
+    if (this.watchers.size >= MAX_WATCHERS) return null;
+    const id = this.nextId;
+    this.nextId += 1;
+    this.watchers.set(id, client);
+    const first = [...this.players.values()].find((p) => p.alive);
+    client.send({
+      t: 'joined',
+      code: this.code,
+      id,
+      players: [...this.players.values()].map(info),
+      pos: first ? first.pos : [0, 40, 0],
+      yaw: first?.yaw ?? 0,
+      match: this.match(),
+      watching: true,
+    });
+    return id;
+  }
+
+  get watcherCount(): number {
+    return this.watchers.size;
+  }
+
   remove(id: number): void {
+    if (this.watchers.delete(id)) return;
     if (this.gameMode === 'crown' && this.phase === 'playing' && this.now() >= this.roundEnd) this.finishRound();
     const leaving = this.players.get(id);
     if (leaving && this.gameMode === 'crown' && this.holder === id && this.phase === 'playing') this.dropCrown(leaving);
@@ -168,6 +198,12 @@ export class Room {
   }
 
   handle(id: number, m: ClientMessage): void {
+    const watcher = this.watchers.get(id);
+    if (watcher) {
+      // A watcher can only ask for its ping.
+      if (m.t === 'ping') watcher.send({ t: 'pong', at: m.at });
+      return;
+    }
     const player = this.players.get(id);
     if (!player) return;
     // The holder at the deadline wins, even if the next tick has not run yet.
@@ -225,7 +261,14 @@ export class Room {
       return;
     }
 
-    target.hp = Math.max(0, target.hp - hitDamage(kind, m.power));
+    const damage = hitDamage(kind, m.power);
+    if (damage === 0) {
+      // A tug on a held web: only the shove reaches them. A damage message ten times a
+      // second would flash their screen red for nothing.
+      if (m.knock) this.sendKnock(shooter, target, m);
+      return;
+    }
+    target.hp = Math.max(0, target.hp - damage);
     const ko = target.hp === 0;
     if (ko) {
       target.alive = false;
@@ -252,8 +295,12 @@ export class Room {
       if ((this.gameMode === 'teams' || this.gameMode === 'deathmatch') && score >= MODE_INFO[this.gameMode].goal) this.finishRound();
     }
 
-    if (!ko && m.knock) {
-      // Only the one hit is moved, by their own game.
+    if (!ko && m.knock) this.sendKnock(shooter, target, m);
+  }
+
+  /** Only the one hit is moved, by their own game, and never harder than the limit. */
+  private sendKnock(shooter: RoomPlayer, target: RoomPlayer, m: Extract<ClientMessage, { t: 'hit' }>): void {
+    if (m.knock) {
       const size = Math.hypot(...m.knock);
       const k = size > MAX_KNOCK ? MAX_KNOCK / size : 1;
       target.client.send({
@@ -422,5 +469,6 @@ export class Room {
     for (const p of this.players.values()) {
       if (p.id !== except) p.client.send(message);
     }
+    for (const watcher of this.watchers.values()) watcher.send(message);
   }
 }

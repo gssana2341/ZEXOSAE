@@ -1,5 +1,6 @@
 // HUD, menus and the settings screen. Plain DOM keeps the menus cheap on phones.
 
+import { SKY_CHOICES, SKY_LABELS, type SkyChoice } from './render/lighting';
 import { MAX_HP } from './sim/hits';
 import {
   cleanCode,
@@ -65,7 +66,7 @@ export class Hud {
   readonly attackButton = el('button', 'pad pad-attack', 'ตี');
   readonly dashButton = el('button', 'pad pad-small pad-dash', 'พุ่ง');
   readonly snareButton = el('button', 'pad pad-small pad-snare', 'ใยรัด');
-  readonly webButton = el('button', 'pad pad-small pad-web', 'ใยพุ่ง');
+  readonly webButton = el('button', 'pad pad-small pad-web', 'ใยดึง');
   readonly focusButton = el('button', 'pad pad-small pad-focus', 'โฟกัส');
   readonly pauseButton = el('button', 'pause-button', 'ตั้งค่า');
   readonly scoresButton = el('button', 'scores-button', 'คะแนน');
@@ -108,6 +109,8 @@ export class Hud {
   private scoreboardKey = '';
   private scoresTapped = false;
   private readonly koNote = el('div', 'ko-note');
+  /** While only watching a room: who is being followed. Null while playing. */
+  watching: string | null = null;
   private readonly pingLabel = el('div', 'ping');
   private readonly nameTags: HTMLElement[] = [];
   private hitTimer = 0;
@@ -210,6 +213,12 @@ export class Hud {
 
   setVisible(visible: boolean): void {
     this.root.classList.toggle('visible', visible);
+  }
+
+  /** Only watching: hides everything that belongs to a body the viewer doesn't have. */
+  setWatching(watching: boolean): void {
+    this.root.classList.toggle('watching', watching);
+    if (!watching) this.watching = null;
   }
 
   toast(text: string, strong = false): void {
@@ -367,8 +376,8 @@ export class Hud {
     this.updateScoreboard(online);
     this.updatePing(online);
 
-    this.koNote.textContent =
-      online.koBy === null ? '' : `ถูก KO โดย ${online.koBy || 'ผู้เล่น'} กำลังเกิดใหม่…`;
+    this.koNote.textContent = this.watching ??
+      (online.koBy === null ? '' : `ถูก KO โดย ${online.koBy || 'ผู้เล่น'} กำลังเกิดใหม่…`);
 
     // Names only show with a clear line of sight, so they can't reveal players behind walls.
     const eye = eyePosition(world.player);
@@ -445,7 +454,11 @@ export interface MenuActions {
   settingsChanged(): void;
   createRoom(name: string, maxPlayers: number, mode: GameMode, privateRoom: boolean): void;
   quickPlay(name: string): void;
+  /** Joins a random open room that already has players, or says there is none. */
+  playNow(): void;
   joinRoom(code: string, name: string): void;
+  /** Goes into a room only to watch. */
+  watchRoom(code: string, name: string): void;
   /** The online screen opened: start refreshing the room board. */
   openLobby(): void;
   /** The player left the online screen without joining a room. */
@@ -462,6 +475,7 @@ export class Menus {
   private readonly status = el('p', 'status');
   private readonly roomList = el('div', 'room-list');
   private joinFromBoard: (code: string) => void = () => undefined;
+  private watchFromBoard: (code: string) => void = () => undefined;
 
   constructor(
     parent: HTMLElement,
@@ -531,13 +545,23 @@ export class Menus {
 
   showMain(): void {
     const panel = el('div', 'panel main');
+    this.status.textContent = '';
+    const playNow = this.button('เล่นทันที', () => {
+      this.status.textContent = 'กำลังหาห้องที่มีคนเล่นอยู่…';
+      this.actions.playNow();
+    }, true);
+    playNow.classList.add('hero-button');
+    const practice = this.button('ซ้อมคนเดียว', () => this.actions.start());
+    practice.classList.add('subtle');
     panel.append(
       el('h1', '', 'ZEXOSAE'),
-      el('p', 'tagline', 'ต้นแบบ: ซ้อมวิ่ง โหนใย และยิงใย'),
+      el('p', 'tagline', 'โหนใย ไต่ตึก และสู้กับเพื่อน'),
       el('p', 'profile-line', this.profileLine()),
-      this.button('เริ่มซ้อม', () => this.actions.start(), true),
-      this.button('เล่นออนไลน์', () => this.showOnline()),
+      playNow,
+      this.status,
+      this.button('ห้องทั้งหมด และสร้างห้อง', () => this.showOnline()),
       this.button('ตั้งค่า', () => this.showSettings(() => this.showMain())),
+      practice,
       this.controlsGuide(),
     );
     this.open(panel);
@@ -552,19 +576,70 @@ export class Menus {
       this.roomList.replaceChildren(el('p', 'empty', 'ยังไม่มีห้องเปิดอยู่ สร้างห้องแรกได้เลย'));
       return;
     }
+    // A code being typed into a private room survives the board refreshing.
+    if (this.roomList.querySelector('.room-code-ask input:focus')) return;
     this.roomList.replaceChildren(
       ...rooms.map((room) => {
         const row = el('div', 'room-row');
         const about = el('div', 'room-about');
-        about.append(el('strong', '', `ห้องของ ${room.host}`), el('span', '', `${MODE_INFO[room.mode ?? 'deathmatch'].name} · รหัส ${room.code}`));
+        const mode = MODE_INFO[room.mode ?? 'deathmatch'].name;
+        about.append(
+          el('strong', '', `${room.private ? '🔒 ' : ''}ห้องของ ${room.host}`),
+          // A private room's code never reaches the board: the host hands it out.
+          el('span', '', room.private ? `${mode} · ห้องส่วนตัว ต้องใช้รหัส` : `${mode} · รหัส ${room.code}`),
+        );
         const full = room.players >= room.max;
         const join = el('button', 'key', full ? 'เต็ม' : 'เข้า');
         join.disabled = full;
-        join.addEventListener('click', () => this.joinFromBoard(room.code));
-        row.append(about, el('span', 'room-count', `${room.players}/${room.max}`), join);
+        const watch = el('button', 'key watch', '👁');
+        watch.title = 'เข้าไปดูเฉยๆ';
+        watch.setAttribute('aria-label', `ดูห้องของ ${room.host}`);
+
+        const go = (enter: (code: string) => void) => {
+          if (!room.private) {
+            enter(room.code);
+            return;
+          }
+          this.askCode(row, enter);
+        };
+        join.addEventListener('click', () => go(this.joinFromBoard));
+        watch.addEventListener('click', () => go(this.watchFromBoard));
+        row.append(about, el('span', 'room-count', `${room.players}/${room.max}`), join, watch);
         return row;
       }),
     );
+  }
+
+  /** Asks for a private room's code under its row, then goes in with it. */
+  private askCode(row: HTMLElement, enter: (code: string) => void): void {
+    row.parentElement?.querySelectorAll('.room-code-ask').forEach((old) => old.remove());
+    const ask = el('div', 'room-code-ask');
+    const input = el('input', 'code');
+    input.maxLength = CODE_LENGTH;
+    input.placeholder = 'รหัสห้อง';
+    input.autocapitalize = 'characters';
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    input.setAttribute('aria-label', 'รหัสห้องส่วนตัว');
+    input.addEventListener('input', () => {
+      input.value = cleanCode(input.value);
+    });
+    const submit = () => {
+      if (input.value.length < CODE_LENGTH) {
+        this.status.textContent = `ห้องนี้เป็นห้องส่วนตัว ใส่รหัส ${CODE_LENGTH} ตัวจากเจ้าของห้อง`;
+        input.focus();
+        return;
+      }
+      enter(input.value);
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submit();
+    });
+    const ok = el('button', 'key', 'ตกลง');
+    ok.addEventListener('click', submit);
+    ask.append(input, ok);
+    row.after(ask);
+    input.focus();
   }
 
   roomBoardLoading(): void {
@@ -640,6 +715,7 @@ export class Menus {
       if (e.key === 'Enter') join();
     });
     this.joinFromBoard = (roomCode) => this.actions.joinRoom(roomCode, name.value);
+    this.watchFromBoard = (roomCode) => this.actions.watchRoom(roomCode, name.value);
 
     const form = el('div', 'online-form');
     form.append(
@@ -666,7 +742,7 @@ export class Menus {
 
     const board = el('div', 'room-board');
     this.roomBoardLoading();
-    board.append(el('h2', '', 'ห้องที่เปิดอยู่'), this.roomList);
+    board.append(el('h2', '', 'ห้องที่เปิดอยู่'), el('p', 'board-help', 'กด 👁 เพื่อเข้าไปดูเฉยๆ ห้องส่วนตัวต้องใส่รหัสทั้งเข้าเล่นและเข้าดู'), this.roomList);
 
     panel.append(form, board);
     this.open(panel);
@@ -750,6 +826,24 @@ export class Menus {
       return row;
     };
 
+    const sky = () => {
+      const row = el('label', 'row');
+      const input = el('select');
+      input.setAttribute('aria-label', 'ช่วงเวลาของเมือง');
+      for (const choice of SKY_CHOICES) {
+        const o = el('option', '', SKY_LABELS[choice]);
+        o.value = choice;
+        input.append(o);
+      }
+      input.value = s.timeOfDay;
+      input.addEventListener('change', () => {
+        s.timeOfDay = input.value as SkyChoice;
+        changed();
+      });
+      row.append(el('span', '', 'ช่วงเวลาของเมือง'), input);
+      return row;
+    };
+
     const range = (
       label: string,
       value: number,
@@ -776,6 +870,24 @@ export class Menus {
       return row;
     };
 
+    const trafficRow = () => {
+      const row = el('label', 'row');
+      const input = el('select');
+      input.setAttribute('aria-label', 'จำนวนรถบนถนน');
+      for (const [value, text] of [['busy', 'เยอะ'], ['some', 'น้อย'], ['off', 'ไม่มี']] as const) {
+        const o = el('option', '', text);
+        o.value = value;
+        input.append(o);
+      }
+      input.value = s.traffic;
+      input.addEventListener('change', () => {
+        s.traffic = input.value as Settings['traffic'];
+        changed();
+      });
+      row.append(el('span', '', 'รถวิ่งบนถนน'), input);
+      return row;
+    };
+
     const toggle = (label: string, value: boolean, onChange: (v: boolean) => void) => {
       const row = el('label', 'row');
       const input = el('input');
@@ -793,6 +905,7 @@ export class Menus {
         s.quality = v;
         changed();
       }),
+      sky(),
       range('มุมมองกล้อง (FOV)', s.fov, 70, 110, 1, (v) => {
         s.fov = v;
         changed();
@@ -801,8 +914,26 @@ export class Menus {
         s.thirdPerson = v;
         changed();
       }),
-      toggle('ลดการเคลื่อนไหวของกล้อง (ช่วยลดอาการเวียนหัว)', s.reduceMotion, (v) => {
+      toggle('ลดการเคลื่อนไหวของกล้องทั้งหมด (ช่วยลดอาการเวียนหัว)', s.reduceMotion, (v) => {
         s.reduceMotion = v;
+        changed();
+      }),
+      el('h3', '', 'เอฟเฟกต์ (ปิดได้ถ้าเวียนหัวหรือเครื่องช้า)'),
+      toggle('กล้องตีลังกาตามตัว (มุมบุคคลที่ 1)', s.cameraFlips, (v) => {
+        s.cameraFlips = v;
+        changed();
+      }),
+      toggle('จอสั่นตอนดิ่ง', s.screenShake, (v) => {
+        s.screenShake = v;
+        changed();
+      }),
+      toggle('ภาพกว้างและกล้องถอยตามความเร็ว', s.speedZoom, (v) => {
+        s.speedZoom = v;
+        changed();
+      }),
+      trafficRow(),
+      toggle('แสงไฟส่องพื้นตอนกลางคืน', s.cityGlow, (v) => {
+        s.cityGlow = v;
         changed();
       }),
       el('h3', '', 'การควบคุม'),

@@ -4,6 +4,7 @@ import { MOVES } from '../src/sim/moves';
 import { emptyInput, horizontalSpeed, knockPlayer, TUNING, type TickInput } from '../src/sim/player';
 import { TICK, World, type WorldEvent } from '../src/sim/world';
 import { createTestArena } from './test-map';
+import { raycast } from '../src/sim/map';
 
 function testWorld(): World {
   return new World(null, createTestArena());
@@ -386,32 +387,39 @@ describe('the web on someone', () => {
     expect(w.player.mode).not.toBe('strike');
   });
 
-  it('a tap zips in and kicks them', () => {
+  it('a tap tugs them in toward the player, without the player flying at them', () => {
     const w = besideDummy(14);
     w.player.pitch = -Math.atan2(0.62, 14);
+    const start = { ...w.player.pos };
     run(w, TICK, { web: true, webHeld: true });
-    run(w, 1, { webHeld: false });
-    expect(w.dummies[0].hp).toBe(MAX_HP - HITS.strike.damage);
+    run(w, 0.6, { webHeld: false });
+    const d = w.dummies[0];
+    expect(Math.hypot(d.pos.x - w.player.pos.x, d.pos.z - w.player.pos.z)).toBeLessThan(10);
+    expect(Math.hypot(w.player.pos.x - start.x, w.player.pos.z - start.z)).toBeLessThan(1);
     expect(w.player.mode).not.toBe('strike');
   });
 
-  it('a hold yanks them in', () => {
+  it('a hold keeps them on the web out in front, and they follow the camera round', () => {
     const w = besideDummy(14);
     w.player.pitch = -Math.atan2(0.62, 14);
     run(w, TICK, { web: true, webHeld: true });
-    run(w, MOVES.webHold + 0.05, { webHeld: true });
-    run(w, 0.3);
+    run(w, 1, { webHeld: true });
     const d = w.dummies[0];
-    expect(Math.hypot(d.pos.x - w.player.pos.x, d.pos.z - w.player.pos.z)).toBeLessThan(10);
+    const ahead = Math.hypot(d.pos.x - w.player.pos.x, d.pos.z - w.player.pos.z);
+    expect(ahead).toBeLessThan(MOVES.tetherHold + 3);
+    // Turn round: they swing with the camera.
+    run(w, 1, { webHeld: true, yaw: Math.PI / 2, pitch: 0 });
+    expect(d.pos.x).toBeLessThan(w.player.pos.x - 2);
+    expect(d.hp).toBe(MAX_HP);
   });
 
-  it('a hold up close throws them where the camera looks', () => {
-    const w = besideDummy(2);
-    const z = w.dummies[0].pos.z;
-    run(w, TICK, { web: true, webHeld: true, aimAssist: false });
-    run(w, MOVES.webHold + 0.05, { webHeld: true, aimAssist: false });
-    run(w, 0.25, { aimAssist: false });
-    expect(w.dummies[0].pos.z).toBeLessThan(z - 3);
+  it('letting go flings them the way the camera looks', () => {
+    const w = besideDummy(14);
+    w.player.pitch = -Math.atan2(0.62, 14);
+    run(w, TICK, { web: true, webHeld: true });
+    run(w, 0.6, { webHeld: true });
+    const events = run(w, TICK, { webHeld: false, yaw: Math.PI / 2, pitch: 0 });
+    expect(events.some((e) => e.type === 'hitTarget' && e.kind === 'throw' && e.knock.x < -10)).toBe(true);
   });
 });
 
@@ -511,8 +519,8 @@ describe('focus', () => {
   });
 });
 
-describe('crates', () => {
-  it('fetches a crate with the web and throws it', () => {
+describe('things on the web', () => {
+  function crateAhead(): World {
     const map = createTestArena();
     map.crates = [{ x: 40, y: 0, z: 8 }];
     const w = new World(null, map);
@@ -520,10 +528,59 @@ describe('crates', () => {
     w.player.yaw = 0;
     w.player.pitch = -Math.atan2(1.2, 10);
     run(w, 0.1, { aimAssist: false });
-    const events = run(w, 0.5, (tick) => ({ snare: tick === 0, aimAssist: false }));
-    expect(events.some((e) => e.type === 'crateThrown')).toBe(true);
-    expect(events.some((e) => e.type === 'shot' && e.snare)).toBe(false);
-    expect(w.crates[0].state).toBe('gone');
+    return w;
+  }
+
+  it('grabs a crate with E and holds it out in front on an elastic web', () => {
+    const w = crateAhead();
+    run(w, TICK, { web: true, webHeld: true, aimAssist: false });
+    expect(w.crates[0].state).toBe('held');
+    run(w, 1, { webHeld: true, aimAssist: false, pitch: 0 });
+    const c = w.crates[0];
+    expect(Math.hypot(c.pos.x - w.player.pos.x, c.pos.z - w.player.pos.z)).toBeLessThan(MOVES.tetherHold + 2);
+  });
+
+  it('flings it on release, and it goes home a while later', () => {
+    const w = crateAhead();
+    run(w, TICK, { web: true, webHeld: true, aimAssist: false });
+    run(w, 0.5, { webHeld: true, aimAssist: false, pitch: 0 });
+    run(w, TICK, { webHeld: false, aimAssist: false, pitch: 0 });
+    expect(w.crates[0].state).toBe('thrown');
+    run(w, 9, { aimAssist: false });
+    expect(w.crates[0].state).toBe('idle');
+    expect(w.crates[0].pos).toEqual({ x: 40, y: 0, z: 8 });
+  });
+
+  it('leaves Q for the snare alone', () => {
+    const w = crateAhead();
+    const events = run(w, 0.3, (tick) => ({ snare: tick === 0, aimAssist: false }));
+    expect(events.some((e) => e.type === 'shot' && e.snare)).toBe(true);
+    expect(w.crates[0].state).toBe('idle');
+  });
+
+  it('can pick up a parked car, which leaves its solid box behind until it comes home', () => {
+    const w = new World();
+    // A car with nothing between it and a spot ten metres off its side.
+    const car = w.pickups.find((p) => {
+      if (p.kind !== 'car' || !p.box) return false;
+      const eye = { x: p.home.x + 10, y: 1.67, z: p.home.z };
+      const hit = raycast(w.map, eye, { x: -0.993, y: -0.12, z: 0 }, 12);
+      return hit?.box === p.box && !raycast(w.map, { x: eye.x, y: 0.5, z: eye.z }, { x: 0, y: 1, z: 0 }, 3);
+    })!;
+    expect(car.box).toBeDefined();
+    const home = JSON.stringify(car.box);
+    w.player.pos = { x: car.home.x + 10, y: 0.05, z: car.home.z };
+    w.player.yaw = Math.PI / 2;
+    w.player.pitch = -Math.atan2(1.2, 10);
+    run(w, 0.1, { aimAssist: false });
+    run(w, TICK, { web: true, webHeld: true, aimAssist: false });
+    expect(car.state).toBe('held');
+    expect(car.box!.max.y).toBeLessThan(0);
+    run(w, 0.4, { webHeld: true, aimAssist: false });
+    run(w, TICK, { webHeld: false, aimAssist: false });
+    run(w, 9, { aimAssist: false });
+    expect(car.state).toBe('idle');
+    expect(JSON.stringify(car.box)).toBe(home);
   });
 });
 
@@ -548,5 +605,91 @@ describe('being hit by another player', () => {
     run(w, 0.3, once({ snare: true, aimAssist: false }));
     expect(open.snareT).toBeGreaterThan(0);
     expect(open.snareT).toBeLessThanOrEqual(TUNING.snareTime);
+  });
+});
+
+describe('steering a swing', () => {
+  function onWeb(): World {
+    const w = testWorld();
+    const p = w.player;
+    p.pos = { x: 0, y: 20, z: 8 };
+    p.vel = { x: 0, y: 0, z: -14 };
+    p.yaw = 0;
+    p.mode = 'swing';
+    p.anchor = { x: 0, y: 40, z: 0 };
+    p.ropeLen = Math.hypot(18.8, 8);
+    return w;
+  }
+
+  it('leans the swing sideways with A and D', () => {
+    const right = onWeb();
+    run(right, 0.8, { swing: true, moveX: 1 });
+    const left = onWeb();
+    run(left, 0.8, { swing: true, moveX: -1 });
+    expect(right.player.pos.x).toBeGreaterThan(1);
+    expect(left.player.pos.x).toBeLessThan(-1);
+  });
+
+  it('builds the lean up slowly, so it feels heavy', () => {
+    const w = onWeb();
+    run(w, 0.1, { swing: true, moveX: 1 });
+    const early = w.player.swingSteer;
+    run(w, 0.6, { swing: true, moveX: 1 });
+    expect(early).toBeLessThan(0.4);
+    expect(w.player.swingSteer).toBeGreaterThan(0.8);
+    run(w, 0.1, { swing: true });
+    expect(w.player.swingSteer).toBeGreaterThan(0.4);
+  });
+});
+
+describe('arriving from a zip', () => {
+  it('hops over the edge with some speed left, instead of freezing', () => {
+    const w = testWorld();
+    w.player.pos = { x: 15, y: 0.05, z: 34 };
+    w.player.yaw = Math.PI;
+    w.player.pitch = 0.3;
+    run(w, 0.1, { aimAssist: false });
+    run(w, TICK, { web: true, aimAssist: false });
+    let carried = 0;
+    for (let i = 0; i < 180 && w.player.mode !== 'ground'; i += 1) {
+      run(w, TICK, { aimAssist: false });
+      if (w.player.mode === 'air') carried = Math.max(carried, horizontalSpeed(w.player));
+    }
+    expect(carried).toBeGreaterThan(3);
+    expect(w.player.pos.y).toBeCloseTo(24, 0);
+  });
+
+  it('eases into the pull rather than starting at full speed', () => {
+    const w = testWorld();
+    w.player.pos = { x: 15, y: 0.05, z: 34 };
+    w.player.yaw = Math.PI;
+    w.player.pitch = 0.3;
+    run(w, 0.1, { aimAssist: false });
+    run(w, TICK, { web: true, aimAssist: false });
+    run(w, TICK, { aimAssist: false });
+    const first = Math.hypot(w.player.vel.x, w.player.vel.y, w.player.vel.z);
+    run(w, 0.3, { aimAssist: false });
+    expect(first).toBeLessThan(MOVES.pointZipSpeed * 0.6);
+    expect(Math.hypot(w.player.vel.x, w.player.vel.y, w.player.vel.z)).toBeGreaterThan(first * 1.5);
+  });
+});
+
+describe('a held web', () => {
+  it('can never carry the player round over the top of its point', () => {
+    const w = testWorld();
+    const p = w.player;
+    p.pos = { x: 0, y: 24, z: 14 };
+    p.vel = { x: 0, y: 8, z: -30 };
+    p.yaw = 0;
+    p.pitch = 0.6;
+    p.mode = 'swing';
+    p.anchor = { x: 0, y: 40, z: 0 };
+    p.ropeLen = Math.hypot(14.8, 14);
+    let highest = -Infinity;
+    for (let i = 0; i < 300; i += 1) {
+      run(w, TICK, { swing: true, aimAssist: false, webAssist: 'off', pitch: 0.6 });
+      if (p.mode === 'swing' && p.anchor) highest = Math.max(highest, p.pos.y + TUNING.ropeHandHeight - p.anchor.y);
+    }
+    expect(highest).toBeLessThan(TUNING.swingOverTop + 0.6);
   });
 });

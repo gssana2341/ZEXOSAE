@@ -26,8 +26,16 @@ export const MOVES = {
   perchRange: 60,
   perchMinDistance: 5,
   pointZipSpeed: 34,
+  /** The pull starts at this speed and builds at this rate. */
+  pointZipStart: 12,
+  pointZipAccel: 70,
+  /** The longest a zip can take before giving up. */
+  pointZipTime: 2.5,
   /** Close enough to count as arrived. */
-  pointZipArrive: 1.2,
+  pointZipArrive: 1.6,
+  /** Arriving, the player hops over the edge with this much speed carried on. */
+  pointZipCarry: 7,
+  pointZipHop: 3.5,
   pointLaunchSpeed: 26,
   pointLaunchUp: 11,
   /** Just after landing on a perch, a jump still launches off it. */
@@ -88,6 +96,20 @@ export const MOVES = {
   strikeReach: 1.6,
   strikeTime: 1,
   strikeSplash: 3,
+
+  // The elastic web on someone or something.
+  /** Shorter than this, a press is a tap: one tug in. */
+  tetherTap: 0.18,
+  /** The longest anything can be held on the web. */
+  tetherTime: 3.5,
+  /** Held things hang this far out along the view. */
+  tetherHold: 5.5,
+  tugEvery: 0.1,
+  /** Pull speed per metre of stretch, and the most it can be. */
+  tugSpring: 3.2,
+  tugMax: 22,
+  yankSpeed: 18,
+  flingSpeed: 18,
   wallPounceRange: 25,
   spinWindow: 0.6,
   spinMax: 3,
@@ -141,10 +163,12 @@ export const ACT_TIME: Record<Act, number> = {
   heal: 0.6,
 };
 
-/** Something the web can be thrown at to fetch: a loose crate. */
+/** Something loose the web can grab: a crate or a parked car. */
 export interface CrateSpot {
   id: number;
   pos: V3;
+  /** How far off the crosshair still catches it, in metres. */
+  size: number;
 }
 
 export interface MoveContext {
@@ -317,7 +341,7 @@ function startPointZip(p: Player, point: V3): void {
   p.sliding = false;
   p.anchor = null;
   p.zipTarget = { x: point.x, y: point.y + 0.05, z: point.z };
-  p.zipT = 2.5;
+  p.zipT = MOVES.pointZipTime;
   p.webLine = { ...point };
   setAct(p, 'zip');
 }
@@ -332,9 +356,15 @@ export function stepZip(p: Player, dt: number): void {
     enterAir(p);
     return;
   }
-  const aim = { x: t.x, y: t.y + 1, z: t.z };
-  const { dir } = dirTo(p.pos, aim);
-  p.vel = { x: dir.x * MOVES.pointZipSpeed, y: dir.y * MOVES.pointZipSpeed, z: dir.z * MOVES.pointZipSpeed };
+  // Aim above the ledge while it's far off and settle onto it as it nears, so the
+  // path bows upward like a pull on a line rather than running dead straight.
+  const flat = Math.hypot(t.x - p.pos.x, t.z - p.pos.z);
+  const aim = { x: t.x, y: t.y + 1.2 + Math.min(4, flat * 0.08), z: t.z };
+  const { dir, dist } = dirTo(p.pos, aim);
+  // Picks up speed after the pull starts, and eases off just before the ledge.
+  const elapsed = MOVES.pointZipTime - p.zipT;
+  const speed = Math.min(MOVES.pointZipSpeed, MOVES.pointZipStart + elapsed * MOVES.pointZipAccel, MOVES.pointZipCarry + dist * 2.2);
+  p.vel = { x: dir.x * speed, y: dir.y * speed, z: dir.z * speed };
 }
 
 // ------------------------------------------------------------------ hanging
@@ -419,7 +449,7 @@ export function tryJumpMoves(p: Player, ctx: MoveContext): boolean {
     return used();
   }
 
-  if (p.mode === 'zip' || (p.mode === 'ground' && p.perchT > 0)) {
+  if (p.mode === 'zip' || (p.perchT > 0 && (p.mode === 'ground' || p.mode === 'air'))) {
     const t = p.zipTarget ?? p.pos;
     const f = p.mode === 'zip' ? flatDir(p.pos, t) : viewForward(p.yaw, 0);
     const dir = Math.hypot(f.x, f.z) > 0.1 ? f : viewForward(p.yaw, 0);
@@ -722,12 +752,6 @@ export function stepStrike(p: Player, ctx: MoveContext, dt: number): void {
 export function pressWeb(p: Player, ctx: MoveContext, aimed: Dummy | null): void {
   if (p.stunT > 0) return;
 
-  const spun = findTarget(ctx, p.lastTarget);
-  if (p.spinT > 0 && spun && p.spins < MOVES.spinMax && dirTo(p.pos, spun.pos).dist < MOVES.webRange && targetVisible(p, ctx.map, spun)) {
-    spin(p, ctx, spun);
-    return;
-  }
-
   const eye = p.aimFrom ?? eyePosition(p);
   const enemy =
     aimed ??
@@ -737,8 +761,19 @@ export function pressWeb(p: Player, ctx: MoveContext, aimed: Dummy | null): void
   if (enemy && dirTo(eye, dummyCenter(enemy)).dist <= MOVES.webRange) {
     p.webTarget = enemy.id;
     p.webHoldT = 0;
+    p.tugT = -1;
     p.webPending = true;
     setAct(p, 'cast');
+    return;
+  }
+
+  const thing = aimPickup(p, ctx);
+  if (thing) {
+    p.holding = thing.id;
+    p.webHoldT = 0;
+    p.webLine = { ...thing.pos };
+    setAct(p, 'cast');
+    ctx.events.push({ type: 'grab', pickup: thing.id });
     return;
   }
 
@@ -769,53 +804,85 @@ export function pressWeb(p: Player, ctx: MoveContext, aimed: Dummy | null): void
   }
 }
 
-/** Decides between a tap and a hold on the web button while it's down. */
+/** Where something held on the web hangs: a few metres out along the view, a little above the hands. */
+export function holdPoint(p: Player): V3 {
+  const eye = eyePosition(p);
+  const look = viewForward(p.yaw, p.pitch);
+  return { x: eye.x + look.x * MOVES.tetherHold, y: eye.y + look.y * MOVES.tetherHold - 0.4, z: eye.z + look.z * MOVES.tetherHold };
+}
+
+/**
+ * The web on someone, while the button is down. A quick tap tugs them in toward the
+ * player. Held, they hang on the web like on a stretched rope: they ease toward a
+ * point out in front, faster the further off they are, so the camera drags them
+ * about. Letting go flings them the way the camera looks.
+ */
 export function stepWebHold(p: Player, input: TickInput, ctx: MoveContext, dt: number): void {
-  if (!p.webPending) return;
-  const target = findTarget(ctx, p.webTarget);
-  if (!target || p.stunT > 0 || dirTo(chest(p), dummyCenter(target)).dist > MOVES.webRange || !targetVisible(p, ctx.map, target)) {
-    p.webPending = false;
+  if (p.holding !== null) {
+    stepHeldThing(p, input, ctx, dt);
     return;
   }
-  if (!input.webHeld) {
+  if (!p.webPending) return;
+  const target = findTarget(ctx, p.webTarget);
+  if (!target || p.stunT > 0 || dirTo(chest(p), dummyCenter(target)).dist > MOVES.webRange + 10 || !targetVisible(p, ctx.map, target)) {
     p.webPending = false;
-    startStrike(p, target, false);
     return;
   }
   p.webHoldT += dt;
-  if (p.webHoldT < MOVES.webHold) return;
-  p.webPending = false;
-
-  const { dist } = dirTo(chest(p), dummyCenter(target));
-  const flat = flatDir(p.pos, target.pos);
-  if (dist <= MOVES.meleeRange + 0.6) {
-    // Close: throw them where the camera looks. In the air, throw them down.
-    const look = viewForward(p.yaw, 0);
-    const knock = airborne(p)
-      ? { x: look.x * 6, y: -24, z: look.z * 6 }
-      : { x: look.x * 20, y: 8, z: look.z * 20 };
-    hitTarget(p, ctx, target, 'throw', knock, 1, true);
-  } else {
-    // Far: pull them in, and up if the player is in the air.
-    const pull = Math.min(24, Math.max(10, dist * 1.2));
-    hitTarget(p, ctx, target, 'yank', { x: -flat.x * pull, y: airborne(p) ? 10 : 4, z: -flat.z * pull }, 0.7);
-  }
   p.webLine = dummyCenter(target);
-  p.webLineT = 0.2;
-  p.spinT = MOVES.spinWindow;
-  p.spins = 0;
-  setAct(p, 'cast');
+  p.webLineT = 0.3;
+
+  const toward = flatDir(target.pos, p.pos);
+  if (!input.webHeld || p.webHoldT > MOVES.tetherTime) {
+    p.webPending = false;
+    if (p.webHoldT < MOVES.tetherTap) {
+      // A tap: one firm tug in, easing off as they come close.
+      const dist = dirTo(chest(p), dummyCenter(target)).dist;
+      const pull = Math.min(MOVES.yankSpeed, dist * 1.3);
+      hitTarget(p, ctx, target, 'yank', { x: toward.x * pull, y: airborne(p) ? 9 : 4, z: toward.z * pull }, 0.6);
+    } else {
+      // Let go of a held web: a fling the way the camera looks, into a wall if there is one.
+      const look = viewForward(p.yaw, p.pitch);
+      const fling = MOVES.flingSpeed;
+      hitTarget(p, ctx, target, 'throw', { x: look.x * fling, y: Math.max(4, look.y * fling + 4), z: look.z * fling }, 1, true);
+    }
+    setAct(p, 'cast');
+    return;
+  }
+  if (p.webHoldT < MOVES.tetherTap || p.webHoldT - p.tugT < MOVES.tugEvery) return;
+  p.tugT = p.webHoldT;
+  const hold = holdPoint(p);
+  const at = dummyCenter(target);
+  const { dir, dist } = dirTo(at, hold);
+  // Elastic: a long stretch pulls hard, a short one barely at all.
+  const speed = Math.min(MOVES.tugMax, dist * MOVES.tugSpring);
+  ctx.events.push({
+    type: 'hitTarget',
+    target: target.id,
+    kind: 'tug',
+    knock: { x: dir.x * speed, y: dir.y * speed + 1.5, z: dir.z * speed },
+    stun: MOVES.tugEvery * 3,
+    pin: false,
+    power: 1,
+  });
 }
 
-/** Each quick press after a throw swings them round the player once more. */
-function spin(p: Player, ctx: MoveContext, target: Dummy): void {
-  const toward = flatDir(target.pos, p.pos);
-  const around = { x: -toward.z, y: 0, z: toward.x };
-  hitTarget(p, ctx, target, 'yank', { x: around.x * 12 + toward.x * 4, y: 3, z: around.z * 12 + toward.z * 4 }, 0.6);
-  p.spins += 1;
-  p.spinT = MOVES.spinWindow;
-  p.webLine = dummyCenter(target);
-  p.webLineT = 0.2;
+/** A crate or a car on the web. The world moves it: this only keeps the line on it and lets go. */
+function stepHeldThing(p: Player, input: TickInput, ctx: MoveContext, dt: number): void {
+  const id = p.holding!;
+  const thing = ctx.crates.find((c) => c.id === id);
+  p.webHoldT += dt;
+  if (!thing || p.stunT > 0) {
+    p.holding = null;
+    return;
+  }
+  p.webLine = { ...thing.pos };
+  p.webLineT = 0.3;
+  if (input.webHeld && p.webHoldT < MOVES.tetherTime) return;
+  const look = viewForward(p.yaw, p.pitch);
+  const fling = MOVES.flingSpeed;
+  ctx.events.push({ type: 'letGo', pickup: id, fling: { x: look.x * fling, y: look.y * fling + 3, z: look.z * fling } });
+  p.holding = null;
   setAct(p, 'cast');
 }
 
@@ -885,9 +952,9 @@ export function pressFocus(p: Player, ctx: MoveContext, aimed: Dummy | null): vo
   }
 }
 
-/** A crate in the crosshair, fetched with the web and thrown where the player looks. */
-export function tryCrate(p: Player, ctx: MoveContext): boolean {
-  if (p.crateCdT > 0 || p.stunT > 0 || !ctx.crates.length) return false;
+/** A crate or a parked car in the crosshair, for the web to grab. */
+export function aimPickup(p: Player, ctx: MoveContext): CrateSpot | null {
+  if (p.crateCdT > 0 || p.stunT > 0 || !ctx.crates.length) return null;
   const eye = p.aimFrom ?? eyePosition(p);
   const f = viewForward(p.yaw, p.pitch);
   let best: CrateSpot | null = null;
@@ -899,18 +966,14 @@ export function tryCrate(p: Player, ctx: MoveContext): boolean {
     const t = ox * f.x + oy * f.y + oz * f.z;
     if (t <= 0 || t > bestT) continue;
     const miss = Math.hypot(ox - f.x * t, oy - f.y * t, oz - f.z * t);
-    if (miss > 1 + t * 0.02) continue;
-    if (raycast(ctx.map, eye, f, t - 0.6)) continue;
+    if (miss > c.size + t * 0.02) continue;
+    // Stop short of the thing itself: a parked car has a solid box of its own.
+    if (raycast(ctx.map, eye, f, Math.max(0.5, t - c.size - 0.6))) continue;
     best = c;
     bestT = t;
   }
-  if (!best) return false;
-  p.crateCdT = MOVES.crateCooldown;
-  p.webLine = { ...best.pos };
-  p.webLineT = 0.2;
-  setAct(p, 'cast');
-  ctx.events.push({ type: 'pullCrate', crate: best.id });
-  return true;
+  if (best) p.crateCdT = MOVES.crateCooldown;
+  return best;
 }
 
 /**

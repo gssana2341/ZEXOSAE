@@ -2,6 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   bodyPose,
   clipFor,
+  DIVE_FROM,
+  DIVE_RANGE,
+  diveAmount,
+  diveLimbs,
+  diveTilt,
   hangLimbs,
   createSwingTrack,
   RELEASE_MOVES,
@@ -291,5 +296,29 @@ describe('hanging on a line', () => {
     const b = hangLimbs(-Math.PI / 2, 1);
     expect(a.legRight.upper.z).toBeLessThan(a.legLeft.upper.z);
     expect(b.legLeft.upper.z).toBeLessThan(b.legRight.upper.z);
+  });
+});
+
+describe('diving', () => {
+  it('starts only in a fast fall, and grows to a full dive', () => {
+    expect(diveAmount(5)).toBe(0);
+    expect(diveAmount(DIVE_FROM)).toBe(0);
+    expect(diveAmount(DIVE_FROM + DIVE_RANGE / 2)).toBeCloseTo(0.5);
+    expect(diveAmount(60)).toBe(1);
+  });
+
+  it('tips the head straight down in a drop, and along the slant when moving forward too', () => {
+    expect(Math.abs(diveTilt(30, 0))).toBeCloseTo(Math.PI, 1);
+    const slant = diveTilt(30, 30);
+    expect(Math.abs(slant)).toBeGreaterThan(Math.PI / 2);
+    expect(Math.abs(slant)).toBeLessThan(Math.abs(diveTilt(30, 0)));
+  });
+
+  it('streamlines the body: arms and legs trail behind the head', () => {
+    const pose = diveLimbs(0);
+    for (const limb of [pose.armRight!, pose.armLeft!, pose.legRight, pose.legLeft]) {
+      expect(limb.upper.y).toBeLessThan(-0.85);
+    }
+    expect(pose.armRight!.upper.x).toBeCloseTo(-pose.armLeft!.upper.x);
   });
 });

@@ -135,9 +135,14 @@ describe('the Spire district', () => {
     }
   });
 
-  it('holds nothing but buildings and the web frame', () => {
+  it('holds only buildings, the web frame, and low street things you can vault', () => {
     const kinds = new Set(map.boxes.map((b) => b.kind));
-    for (const clutter of ['prop', 'run', 'ledge'] as const) expect(kinds.has(clutter)).toBe(false);
+    for (const clutter of ['run', 'ledge'] as const) expect(kinds.has(clutter)).toBe(false);
+    for (const box of map.boxes.filter((b) => b.kind === 'prop')) {
+      // Cars are low enough to vault. Trees stand on the ground, in parks.
+      expect(box.min.y).toBeLessThan(7);
+      expect(box.max.y).toBeLessThan(8);
+    }
   });
 
   it('the web frame over the plaza stays tidy: every beam runs along an axis through it', () => {

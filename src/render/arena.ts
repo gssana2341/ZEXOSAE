@@ -2,6 +2,7 @@
 // so the download stays small. Boxes are merged into a few meshes to keep draw calls
 // low on phones. Nothing in this file affects play: collision lives in sim/map.ts.
 
+import { CITY_FROM } from '../sim/city';
 import * as THREE from 'three';
 import { ARENA_LIMIT, type Box, type BoxKind, type GameMap, type V3 } from '../sim/map';
 import { shellFor } from './shells';
@@ -158,8 +159,14 @@ function windowTexture(lit: boolean): THREE.Texture {
 
 // ------------------------------------------------------------- level meshes
 
+/** How far the roof filler sits under a model's roof, and in from its walls, in metres. */
+const CAP_DROP = 0.3;
+const CAP_INSET = 0.12;
+/** How far inside a modelled building its plain backing wall stands. */
+const BACKING_INSET = 1.2;
+
 /** Returns the meshes that the Kenney buildings replace once they have loaded. */
-function buildBoxes(map: GameMap, group: THREE.Group): THREE.Object3D[] {
+function buildBoxes(map: GameMap, group: THREE.Group): { replaced: THREE.Object3D[]; windows: THREE.MeshLambertMaterial } {
   const facade = new MeshBuilder();
   const solid = new MeshBuilder();
   const coveredFacade = new MeshBuilder();
@@ -186,11 +193,28 @@ function buildBoxes(map: GameMap, group: THREE.Group): THREE.Object3D[] {
       // Walls sit in shade at street level, so the city looks grounded without real occlusion.
       const shades = face.corners.map((p) => (box.kind === 'building' && face.axis !== 'y' && p.y === box.min.y ? 0.6 : 1));
       if (covered && isTop) {
-        // Sits just under the model's roof, and fills any gap left by cutting off roof clutter.
-        const lowered = face.corners.map((p) => ({ ...p, y: p.y - 0.03 }));
+        // Fills any gap left by cutting off roof clutter. It sits well under the model's
+        // roof and stops short of its walls: a few centimetres apart, the two surfaces
+        // fight over every pixel on distant towers and the roofs flicker.
+        const cx = (box.min.x + box.max.x) / 2;
+        const cz = (box.min.z + box.max.z) / 2;
+        const inset = (value: number, middle: number) => value + Math.sign(middle - value) * CAP_INSET;
+        const lowered = face.corners.map((p) => ({ x: inset(p.x, cx), y: p.y - CAP_DROP, z: inset(p.z, cz) }));
         caps.quad(lowered, face.normal, uvs, capColor);
       }
       const target = onWall ? (covered ? coveredFacade : facade) : covered ? coveredSolid : solid;
+      if (covered && face.axis !== 'y') {
+        // A modelled building keeps a plain wall of its own just inside the model. Some
+        // models don't fill their whole box, and without this the gap showed straight
+        // through under a full roof. Deep enough not to cover the model's recesses.
+        const cx = (box.min.x + box.max.x) / 2;
+        const cz = (box.min.z + box.max.z) / 2;
+        const inset = (value: number, middle: number) => value + Math.sign(middle - value) * BACKING_INSET;
+        const backed = face.corners.map((p) => ({ x: inset(p.x, cx), y: p.y, z: inset(p.z, cz) }));
+        target.quad(backed, face.normal, onWall && face.axis === 'x' ? uvs.map(([a, b]) => [b, a]) : uvs, color, shades);
+        continue;
+      }
+      if (covered && face.axis === 'y') continue;
       target.quad(face.corners, face.normal, onWall && face.axis === 'x' ? uvs.map(([a, b]) => [b, a]) : uvs, color, shades);
     }
   });
@@ -215,7 +239,7 @@ function buildBoxes(map: GameMap, group: THREE.Group): THREE.Object3D[] {
     mesh.receiveShadow = true;
     group.add(mesh);
   }
-  return replaced;
+  return { replaced, windows: wallMaterial };
 }
 
 /** Road paint, pavements and the plaza floor. All flat, so none of it can trip a player. */
@@ -239,6 +263,8 @@ function buildGround(map: GameMap, group: THREE.Group): void {
   // Pavement around every block that reaches the ground.
   for (const box of map.boxes) {
     if (box.kind !== 'building' || box.min.y !== 0 || box.max.x - box.min.x < 6) continue;
+    // Out in the street grid, every block already has its pavement.
+    if (Math.max(Math.abs((box.min.x + box.max.x) / 2), Math.abs((box.min.z + box.max.z) / 2)) >= CITY_FROM - 20) continue;
     rect(box.min.x - 2, box.min.z - 2, box.max.x + 2, box.max.z + 2, 0.02, '#8a8e9e');
   }
 
@@ -263,14 +289,7 @@ function buildGround(map: GameMap, group: THREE.Group): void {
     rect(-25, a, -22, a + 1.2, 0.05, '#eeeeee');
   }
 
-  // Lane markings continue through the new neighbourhoods, leaving the plaza intact.
-  for (let lane = -420; lane <= 420; lane += 56) {
-    for (let s = -410; s < 410; s += 12) {
-      if (Math.max(Math.abs(lane), Math.abs(s)) < 150) continue;
-      rect(lane - 0.12, s, lane + 0.12, s + 5, 0.05, '#eee4c7');
-      rect(s, lane - 0.12, s + 5, lane + 0.12, 0.05, '#eee4c7');
-    }
-  }
+  // The street grid beyond the district draws its own roads and pavements (streets.ts).
 
   const mesh = flat.build(new THREE.MeshLambertMaterial({ map: gridTexture(), vertexColors: true }));
   mesh.receiveShadow = true;
@@ -302,7 +321,7 @@ export function farTowers(): FarTower[] {
 }
 
 /** Distant towers past the edge of the arena, and clouds. Returns the towers, which Kenney models replace. */
-function buildSkyline(group: THREE.Group): THREE.Object3D {
+function buildSkyline(group: THREE.Group): { far: THREE.Mesh; clouds: THREE.MeshBasicMaterial; land: THREE.MeshBasicMaterial } {
   const towers = new MeshBuilder();
   const clouds = new MeshBuilder();
 
@@ -312,54 +331,22 @@ function buildSkyline(group: THREE.Group): THREE.Object3D {
     const x = (noise(i + 400) - 0.5) * 1200;
     const z = (noise(i + 500) - 0.5) * 1200;
     const y = 130 + noise(i + 600) * 60;
-    clouds.box(x, y, z, 40 + noise(i + 700) * 40, 3, 18 + noise(i + 800) * 16, '#ffd7c4');
-    clouds.box(x + 8, y + 3, z, 22, 3, 12, '#ffe6d6');
+    // White, so the time of day can tint them.
+    clouds.box(x, y, z, 40 + noise(i + 700) * 40, 3, 18 + noise(i + 800) * 16, '#f2f2f2');
+    clouds.box(x + 8, y + 3, z, 22, 3, 12, '#ffffff');
   }
 
   const far = towers.build(new THREE.MeshLambertMaterial({ map: windowTexture(false), vertexColors: true }));
   group.add(far);
-  group.add(clouds.build(new THREE.MeshBasicMaterial({ vertexColors: true })));
+  const cloudMaterial = new THREE.MeshBasicMaterial({ vertexColors: true, color: '#ffd7c4' });
+  group.add(clouds.build(cloudMaterial));
 
-  const land = new THREE.Mesh(
-    new THREE.PlaneGeometry(2600, 2600),
-    new THREE.MeshBasicMaterial({ color: '#3a3f58' }),
-  );
+  const landMaterial = new THREE.MeshBasicMaterial({ color: '#3a3f58' });
+  const land = new THREE.Mesh(new THREE.PlaneGeometry(2600, 2600), landMaterial);
   land.rotation.x = -Math.PI / 2;
   land.position.y = -4.5;
   group.add(land);
-  return far;
-}
-
-function buildSky(group: THREE.Group): void {
-  const skyRadius = 1800;
-  const geometry = new THREE.SphereGeometry(skyRadius, 24, 14);
-  const position = geometry.getAttribute('position');
-  const colors: number[] = [];
-  const color = new THREE.Color();
-  const low = new THREE.Color('#ffb27a');
-  const mid = new THREE.Color('#d9799a');
-  const high = new THREE.Color('#40509a');
-
-  for (let i = 0; i < position.count; i += 1) {
-    const t = Math.max(0, position.getY(i) / skyRadius);
-    if (t < 0.22) color.copy(low).lerp(mid, t / 0.22);
-    else color.copy(mid).lerp(high, Math.min(1, (t - 0.22) / 0.5));
-    colors.push(color.r, color.g, color.b);
-  }
-  geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-
-  const sky = new THREE.Mesh(
-    geometry,
-    new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide, fog: false }),
-  );
-  group.add(sky);
-
-  const sun = new THREE.Mesh(
-    new THREE.SphereGeometry(26, 20, 14),
-    new THREE.MeshBasicMaterial({ color: '#fff0c8', fog: false }),
-  );
-  sun.position.copy(SUN_DIRECTION).multiplyScalar(1700);
-  group.add(sun);
+  return { far, clouds: cloudMaterial, land: landMaterial };
 }
 
 /** Low in the sky, for long shadows across the plaza. */
@@ -370,13 +357,26 @@ export interface Arena {
   group: THREE.Group;
   /** Hidden once the Kenney city has loaded. */
   placeholders: THREE.Object3D[];
+  /** Materials the time of day changes. */
+  windows: THREE.MeshLambertMaterial;
+  far: THREE.MeshLambertMaterial;
+  clouds: THREE.MeshBasicMaterial;
+  land: THREE.MeshBasicMaterial;
 }
 
 export function buildArena(map: GameMap): Arena {
   const group = new THREE.Group();
-  buildSky(group);
+  // The sky itself belongs to the time of day (lighting.ts).
   const skyline = buildSkyline(group);
-  const walls = buildBoxes(map, group);
+  const { windows } = buildBoxes(map, group);
   buildGround(map, group);
-  return { group, placeholders: [skyline, ...walls] };
+  return {
+    group,
+    // The backing walls under the models stay: only the stand-in skyline is swapped out.
+    placeholders: [skyline.far],
+    windows,
+    far: skyline.far.material as THREE.MeshLambertMaterial,
+    clouds: skyline.clouds,
+    land: skyline.land,
+  };
 }

@@ -1,6 +1,7 @@
 // Loads the Kenney city models and bakes them into independently culled city chunks
 // before the game starts, so running through the map never swaps building models.
 
+import { scatterWindows } from './lighting';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
@@ -196,6 +197,40 @@ export function flushShell(source: THREE.BufferGeometry): THREE.BufferGeometry {
   return g;
 }
 
+/** Longer than this, in metres, and thinner than SLIVER_WIDTH, a triangle is a sliver. */
+const SLIVER_LENGTH = 6;
+const SLIVER_WIDTH = 0.06;
+
+/**
+ * Drops the long, hair-thin triangles left where trim was pressed flat against a wall.
+ * They are too thin to show as a surface, so they shimmer as bright lines across the city.
+ */
+export function withoutSlivers(g: THREE.BufferGeometry): THREE.BufferGeometry {
+  const index = g.getIndex();
+  if (!index) return g;
+  const position = g.getAttribute('position');
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const c = new THREE.Vector3();
+  const kept: number[] = [];
+  for (let i = 0; i < index.count; i += 3) {
+    const ia = index.getX(i);
+    const ib = index.getX(i + 1);
+    const ic = index.getX(i + 2);
+    a.fromBufferAttribute(position, ia);
+    b.fromBufferAttribute(position, ib);
+    c.fromBufferAttribute(position, ic);
+    const longest = Math.max(a.distanceTo(b), b.distanceTo(c), c.distanceTo(a));
+    const twiceArea = b.clone().sub(a).cross(c.clone().sub(a)).length();
+    // The triangle's height across its longest edge.
+    if (longest > SLIVER_LENGTH && twiceArea / longest < SLIVER_WIDTH) continue;
+    kept.push(ia, ib, ic);
+  }
+  if (kept.length === index.count) return g;
+  g.setIndex(kept);
+  return g;
+}
+
 /** Stretches a model to exactly cover a footprint, with its roof at the given height. */
 function fitted(
   model: Model,
@@ -210,7 +245,7 @@ function fitted(
     shell.rotateY(turn * QUARTER_TURN);
     shell.scale(max.x - min.x, max.y - min.y, max.z - min.z);
     shell.translate((min.x + max.x) / 2, min.y, (min.z + max.z) / 2);
-    return shell;
+    return withoutSlivers(shell);
   }
   const g = model.geometry.clone();
   g.rotateY(turn * QUARTER_TURN);
@@ -226,7 +261,23 @@ function fitted(
   g.translate(-center.x, -box.min.y, -center.z);
   g.scale(sx, sy, sz);
   g.translate((min.x + max.x) / 2, min.y, (min.z + max.z) / 2);
-  return g;
+  return withoutSlivers(g);
+}
+
+/**
+ * Paint washes for the buildings. Only a handful of models dress the whole city, so a
+ * tint per building keeps neighbours from looking like copies.
+ */
+const TINTS = ['#ffffff', '#f6e7d6', '#e1ebf7', '#f1e3ee', '#e3f0e1', '#f8efd5', '#dfe2ea', '#f4dcd2'].map(
+  (hex) => new THREE.Color(hex),
+);
+
+function tinted(geometry: THREE.BufferGeometry, tint: THREE.Color): THREE.BufferGeometry {
+  const count = geometry.getAttribute('position').count;
+  const colors = new Float32Array(count * 3);
+  for (let i = 0; i < count; i += 1) colors.set([tint.r, tint.g, tint.b], i * 3);
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  return geometry;
 }
 
 function mergedMesh(parts: THREE.BufferGeometry[], material: THREE.Material): THREE.Mesh {
@@ -240,6 +291,40 @@ export interface KenneyCity {
   city: THREE.Group;
   /** Distant towers. */
   far: THREE.Mesh;
+  /** The buildings' material and the distant towers', for the time of day to light. */
+  walls: THREE.MeshLambertMaterial;
+  farMaterial: THREE.MeshLambertMaterial;
+}
+
+/**
+ * A mask of the atlas with only its window glass kept, in a warm lamp colour. As
+ * the emissive map it lights the windows at night and nothing else.
+ */
+function glassGlow(atlas: THREE.Texture | null): THREE.Texture | null {
+  const image = atlas?.image as (CanvasImageSource & { width: number; height: number }) | undefined;
+  if (!image?.width) return null;
+  const canvas = document.createElement('canvas');
+  canvas.width = image.width;
+  canvas.height = image.height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  ctx.drawImage(image, 0, 0);
+  const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const d = pixels.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const [r, g, b] = [d[i], d[i + 1], d[i + 2]];
+    // Glass in the kit is a clear light blue: bluer than it is red, and bright.
+    const glass = b > 140 && b > r + 25 && g > r;
+    d[i] = glass ? 255 : 0;
+    d[i + 1] = glass ? 206 : 0;
+    d[i + 2] = glass ? 130 : 0;
+  }
+  ctx.putImageData(pixels, 0, 0);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.flipY = atlas!.flipY;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.magFilter = THREE.NearestFilter;
+  return texture;
 }
 
 export async function loadKenneyCity(map: GameMap, maxAnisotropy = 1): Promise<KenneyCity> {
@@ -262,7 +347,7 @@ export async function loadKenneyCity(map: GameMap, maxAnisotropy = 1): Promise<K
     const z = Math.floor((box.min.z + box.max.z) / 2 / chunkSize);
     const key = `${x},${z}`;
     const chunk = chunks.get(key) ?? { x: (x + 0.5) * chunkSize, z: (z + 0.5) * chunkSize, parts: [] };
-    chunk.parts.push(fitted(get(name), i % 4, min, max, true).translate(-chunk.x, 0, -chunk.z));
+    chunk.parts.push(tinted(fitted(get(name), i % 4, min, max, true), TINTS[(i * 7) % TINTS.length]).translate(-chunk.x, 0, -chunk.z));
     chunks.set(key, chunk);
     if (performance.now() - sliceStarted > 6) {
       await yieldToBrowser();
@@ -278,7 +363,15 @@ export async function loadKenneyCity(map: GameMap, maxAnisotropy = 1): Promise<K
     atlas.anisotropy = Math.max(1, Math.min(4, maxAnisotropy));
     atlas.needsUpdate = true;
   }
-  const wallMaterial = new THREE.MeshLambertMaterial({ map: atlas });
+  const glow = glassGlow(atlas);
+  const wallMaterial = new THREE.MeshLambertMaterial({
+    map: atlas,
+    vertexColors: true,
+    emissiveMap: glow,
+    emissive: new THREE.Color(glow ? '#ffffff' : '#000000'),
+    emissiveIntensity: 0,
+  });
+  scatterWindows(wallMaterial);
   for (const chunk of chunks.values()) {
     const walls = mergedMesh(chunk.parts, wallMaterial);
     for (const part of chunk.parts) part.dispose();
@@ -307,12 +400,17 @@ export async function loadKenneyCity(map: GameMap, maxAnisotropy = 1): Promise<K
       sliceStarted = performance.now();
     }
   }
-  const far = mergedMesh(
-    farParts,
-    new THREE.MeshLambertMaterial({ map: kitOf(FAR_MODELS[0]), color: '#8a93c4' }),
-  );
+  const farMaterial = new THREE.MeshLambertMaterial({
+    map: kitOf(FAR_MODELS[0]),
+    color: '#8a93c4',
+    emissiveMap: glassGlow(kitOf(FAR_MODELS[0])),
+    emissive: new THREE.Color('#ffffff'),
+    emissiveIntensity: 0,
+  });
+  scatterWindows(farMaterial);
+  const far = mergedMesh(farParts, farMaterial);
   for (const part of farParts) part.dispose();
   far.geometry.computeBoundingSphere();
 
-  return { city, far };
+  return { city, far, walls: wallMaterial, farMaterial };
 }

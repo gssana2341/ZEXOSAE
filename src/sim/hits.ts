@@ -10,6 +10,7 @@ export type HitKind =
   | 'launch'
   | 'strike'
   | 'yank'
+  | 'tug'
   | 'throw'
   | 'pound'
   | 'crate'
@@ -23,6 +24,7 @@ export const HIT_KINDS: readonly HitKind[] = [
   'launch',
   'strike',
   'yank',
+  'tug',
   'throw',
   'pound',
   'crate',
@@ -47,6 +49,8 @@ export const HITS: Record<HitKind, HitSpec> = {
   launch: { damage: 8, cooldown: 0.4, range: 6 },
   strike: { damage: 14, cooldown: 0.4, range: 8 },
   yank: { damage: 4, cooldown: 0.25, range: 40 },
+  /** Holding someone on the web: many small pulls, none of them painful. */
+  tug: { damage: 0, cooldown: 0.08, range: 45 },
   throw: { damage: 12, cooldown: 0.5, range: 7 },
   /** Scaled by how far the player fell: a short drop does a third of this. */
   pound: { damage: 40, cooldown: 0.8, range: 14 },

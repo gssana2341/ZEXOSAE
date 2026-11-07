@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Room, type Client } from '../src/net/room';
+import { MAX_WATCHERS, Room, type Client } from '../src/net/room';
 import {
   cleanName,
   MAX_ROOM_SIZE,
@@ -379,3 +379,40 @@ describe('online world', () => {
   });
 });
 
+
+describe('watching a room', () => {
+  it('sees every update, without joining the game', () => {
+    const { room, a, idA, idB, hit } = roomWithTwo();
+    const watcher = new FakeClient();
+    const id = room.watch(watcher)!;
+    expect(watcher.last('joined')).toMatchObject({ watching: true });
+    expect(watcher.last('joined')!.players.map((p) => p.id)).not.toContain(id);
+    expect(room.size).toBe(2);
+    room.tick();
+    expect(watcher.last('snapshot')!.players.map((p) => p.id)).toEqual(expect.arrayContaining([idA, idB]));
+    hit();
+    expect(watcher.last('damage')).toBeDefined();
+    expect(a.last('playerJoin')?.player.id).not.toBe(id);
+  });
+
+  it('can never hit anyone or be hit', () => {
+    const { room, a, idA } = roomWithTwo();
+    const watcher = new FakeClient();
+    const id = room.watch(watcher)!;
+    room.handle(id, { t: 'hit', target: idA, snare: false });
+    room.handle(idA, { t: 'hit', target: id, snare: false });
+    expect(a.inbox.filter((m) => m.t === 'damage')).toHaveLength(0);
+    room.handle(id, { t: 'ping', at: 5 });
+    expect(watcher.last('pong')?.at).toBe(5);
+  });
+
+  it('takes a limited number of watchers, who leave quietly', () => {
+    const { room, a } = roomWithTwo();
+    const ids = Array.from({ length: MAX_WATCHERS }, () => room.watch(new FakeClient()));
+    expect(ids.every((id) => id !== null)).toBe(true);
+    expect(room.watch(new FakeClient())).toBeNull();
+    room.remove(ids[0]!);
+    expect(a.last('playerLeave')).toBeUndefined();
+    expect(room.watch(new FakeClient())).not.toBeNull();
+  });
+});

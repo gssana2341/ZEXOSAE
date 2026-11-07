@@ -28,8 +28,8 @@ export interface ChaseCamera {
 export const CHASE = {
   /** Metres behind the head at rest, and the most speed can add. */
   baseDistance: 2.8,
-  speedDistance: 0.04,
-  maxSpeedDistance: 0.9,
+  speedDistance: 0.085,
+  maxSpeedDistance: 2.3,
   swingDistance: 0.35,
   shoulder: 0.75,
   lift: 0.55,
@@ -41,8 +41,11 @@ export const CHASE = {
   distanceRate: 2.5,
   /** The furthest the spring can stretch from where it wants to be. */
   maxLag: 1.6,
-  /** The hard limit from the head, so the hero never shrinks on screen at top speed. */
-  maxDistance: 4.4,
+  /**
+   * The hard limit from the head. At top speed the hero shrinks a little, which sells
+   * the speed, but stays big enough to steer by.
+   */
+  maxDistance: 5.8,
   wallGap: 0.35,
   leanPerSpeed: 0.0045,
   maxLean: 0.11,

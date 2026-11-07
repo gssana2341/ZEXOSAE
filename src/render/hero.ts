@@ -542,17 +542,78 @@ function webArm(web: THREE.Vector3, side: Side) {
   return { upper: web.clone().add(new THREE.Vector3(side * 0.16, -0.24, 0)).normalize(), lower: web.clone() };
 }
 
+/** The first-person rig, in camera space: the right shoulder, and the two arm lengths to the knuckles. */
+const FP_SHOULDER = new THREE.Vector3(0.216, -0.3, 0.076);
+const FP_UPPER = 0.255;
+const FP_LOWER = 0.366;
+/** How far up the web, from between the shoulders, the hands close on it. */
+const FP_GRIP_REACH = 0.5;
+/** The lower fist sits this far below the upper one on the line. */
+const FP_GRIP_SPACING = 0.1;
+
+/** Bends an arm so its hand lands on a point, elbow out and down. */
+export function reachArm(target: THREE.Vector3, side: Side) {
+  const shoulder = FP_SHOULDER.clone().setX(FP_SHOULDER.x * side);
+  const toward = target.clone().sub(shoulder);
+  const most = FP_UPPER + FP_LOWER - 0.01;
+  const least = Math.abs(FP_UPPER - FP_LOWER) + 0.01;
+  const d = THREE.MathUtils.clamp(toward.length(), least, most);
+  const u = toward.normalize();
+  const cos = THREE.MathUtils.clamp((FP_UPPER * FP_UPPER + d * d - FP_LOWER * FP_LOWER) / (2 * FP_UPPER * d), -1, 1);
+  const pole = new THREE.Vector3(side, -1, 0.3);
+  pole.sub(u.clone().multiplyScalar(u.dot(pole))).normalize();
+  const elbow = shoulder
+    .clone()
+    .addScaledVector(u, FP_UPPER * cos)
+    .addScaledVector(pole, FP_UPPER * Math.sqrt(1 - cos * cos));
+  const hand = shoulder.clone().addScaledVector(u, d);
+  return { upper: elbow.clone().sub(shoulder).normalize(), lower: hand.sub(elbow).normalize() };
+}
+
+/**
+ * Both hands on one web: the fists close on the line one above the other, the web's
+ * own hand on top, as on a rope.
+ */
+function twoHandWebArm(web: THREE.Vector3, side: Side, top: Side) {
+  // Up the line, but kept out in front where it can be seen, even when the anchor is
+  // overhead or off to the side.
+  const along = web.clone();
+  along.z = Math.min(along.z, -0.6);
+  along.normalize();
+  const grip = new THREE.Vector3(0, FP_SHOULDER.y, FP_SHOULDER.z).addScaledVector(along, FP_GRIP_REACH);
+  if (side !== top) grip.addScaledVector(along, -FP_GRIP_SPACING);
+  return reachArm(grip, side);
+}
+
+/** A punch: a short wind back, a fast straight strike to the middle of the view, then home. */
+function punchCurve(t: number): number {
+  if (t < 0.2) return -(t / 0.2) * 0.35;
+  if (t < 0.45) return -0.35 + ((t - 0.2) / 0.25) * 1.35;
+  return Math.max(0, 1 - (t - 0.45) / 0.55);
+}
+
 /** The arm pose for what the player is doing. Written for the right arm, then mirrored. */
 export function armPoseFor(m: ArmMoment): ArmPose {
   const swing = Math.sin(m.stride) * 0.22;
   const punchSide: Side | null = m.action === 'jab' ? -1 : m.action === 'cross' || m.action === 'finisher' ? 1 : null;
-  const punch = punchSide === null ? 0 : Math.sin(Math.PI * Math.max(0, Math.min(1, m.actionProgress ?? 0)));
+  const punch = punchSide === null ? 0 : punchCurve(Math.max(0, Math.min(1, m.actionProgress ?? 0)));
 
   const restFor = (side: Side) => {
-    if (side === punchSide && punch > 0) {
-      return pair(arm(0.14 - punch * 0.12, 0.05 + punch * 0.12, -1), arm(-0.04, 0.45 - punch * 0.4, -1), side);
+    if (side === punchSide && punch !== 0) {
+      // Out to the centre of the view, forearm level: the fist lands right under the crosshair.
+      const p = Math.max(0, punch);
+      const back = Math.max(0, -punch);
+      return pair(
+        arm(0.14 - p * 0.13 + back * 0.08, 0.02 + p * 0.1 - back * 0.1, -1 + back * 0.4),
+        arm(-0.04 - p * 0.1, 0.45 - p * 0.42 + back * 0.2, -1),
+        side,
+      );
     }
     const kick = m.kickSide === side ? m.kick : 0;
+    if (kick > 0 && m.mode !== 'swing') {
+      // A web shot: the arm snaps out toward the crosshair and the hand opens.
+      return pair(arm(0.14 - kick * 0.12, -0.02 + kick * 0.14, -1), arm(-0.04 - kick * 0.1, 0.45 - kick * 0.38, -1), side);
+    }
     if (m.mode === 'dash') return pair(arm(0.22, -0.12, -1), arm(0.02, 0.3, -0.95), side);
     if (m.mode === 'air' || m.mode === 'swing') {
       return pair(arm(0.3 - kick * 0.2, 0.06 + kick * 0.1, -0.95), arm(0.06 - kick * 0.14, 0.55 - kick * 0.15, -0.83), side);
@@ -583,8 +644,9 @@ export function armPoseFor(m: ArmMoment): ArmPose {
   }
 
   const holding = (side: Side) => m.web !== null && (m.twoHands || m.webSide === side);
-  const right = holding(1) ? webArm(m.web!, 1) : restFor(1);
-  const left = holding(-1) ? webArm(m.web!, -1) : restFor(-1);
+  const onWeb = (side: Side) => (m.twoHands ? twoHandWebArm(m.web!, side, m.webSide) : webArm(m.web!, side));
+  const right = holding(1) ? onWeb(1) : restFor(1);
+  const left = holding(-1) ? onWeb(-1) : restFor(-1);
   const gripOf = (side: Side) => {
     if (holding(side)) return 1;
     if (side === punchSide) return 1;

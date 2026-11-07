@@ -160,6 +160,8 @@ export interface CharacterView {
   land: number;
   /** How far through a hand-over-hand climb up a line. */
   ropePhase: number;
+  /** How far into a head-first dive the body is, eased, from 0 to 1. */
+  dive: number;
   /** Which hand is higher on a line, so the web leaves from it. */
   ropeTop: 1 | -1;
   /** The mode last frame, to spot the moment of landing. */
@@ -233,6 +235,7 @@ export function buildCharacter(): CharacterView {
     ledge: 0,
     land: 0,
     ropePhase: 0,
+    dive: 0,
     ropeTop: 1,
     lastMode: undefined,
   };

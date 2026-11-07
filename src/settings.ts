@@ -1,3 +1,5 @@
+import type { TrafficLevel } from './render/streets';
+import type { SkyChoice } from './render/lighting';
 export type Quality = 'low' | 'medium' | 'high';
 
 export type Action =
@@ -36,6 +38,18 @@ export interface Settings {
   reduceMotion: boolean;
   swapButtons: boolean;
   thirdPerson: boolean;
+  /** The light over the city: a fixed time of day, or drifting through them all. */
+  timeOfDay: SkyChoice;
+  /** First person: the view turns over with flips and spins after letting go of a web. */
+  cameraFlips: boolean;
+  /** The view trembles in a fast dive. */
+  screenShake: boolean;
+  /** The view widens and the third-person camera falls back with speed. */
+  speedZoom: boolean;
+  /** How many cars drive the streets. Fewer is lighter on slow devices. */
+  traffic: TrafficLevel;
+  /** Pools of light under street lamps and in front of cars at night. */
+  cityGlow: boolean;
   touchLayout: Partial<Record<ControlId, ControlLayout>>;
   keys: Record<Action, string>;
   /** Only present in saved settings. */
@@ -52,8 +66,8 @@ export const ACTION_LABELS: Record<Action, string> = {
   dash: 'พุ่งหลบ',
   slide: 'สไลด์ / ย่อชาร์จกระโดด / ทุบพื้นกลางอากาศ',
   shoot: 'ต่อยระยะใกล้ / ยิงใย (ค้างเพื่อเสยหรือเตะ)',
-  snare: 'ใยรัด / ดึงกล่องมาปา',
-  web: 'ใยพุ่ง: แตะพุ่งเตะ ค้างกระชาก / ดีดขึ้นขอบ / แขวน',
+  snare: 'ใยรัด (แช่แข็ง)',
+  web: 'ใยดึง: แตะดึงเข้าหา ค้างลากไปมา ปล่อยเหวี่ยง (คน กล่อง รถ) / ดีดขึ้นขอบ / แขวน',
   focus: 'โฟกัส: ฟื้นเลือด / ท่าปิดฉาก / ท่าเท่กลางอากาศ',
   reset: 'กลับจุดเริ่ม',
   scores: 'ดูคะแนน (กดค้าง)',
@@ -76,6 +90,12 @@ function defaults(): Settings {
     reduceMotion: false,
     swapButtons: false,
     thirdPerson: false,
+    timeOfDay: 'sunset',
+    cameraFlips: true,
+    screenShake: true,
+    speedZoom: true,
+    traffic: isTouchDevice() ? 'some' : 'busy',
+    cityGlow: true,
     touchLayout: {},
     keys: {
       forward: 'KeyW',

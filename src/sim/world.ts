@@ -7,19 +7,18 @@ import {
   createArena,
   raycast,
   RING_RADIUS,
+  type Box,
   type GameMap,
   type SpawnPoint,
   type V3,
 } from './map';
-import { viewForward } from './aim';
 import { hitDamage, MAX_HP, type HitKind } from './hits';
 import type { GameMode, Team } from './game-modes';
-import { healPlayer, nearWall } from './moves';
+import { healPlayer, holdPoint, nearWall } from './moves';
 import {
   createPlayer,
   dummyCenter,
   eyePosition,
-  handPosition,
   stepPlayer,
   TUNING,
   type Dummy,
@@ -35,10 +34,17 @@ const DUMMY_HP = MAX_HP;
 const DUMMY_GRAVITY = 36;
 /** A dummy knocked further than this from its path, or off its floor, blinks back to it. */
 const DUMMY_LEASH = 15;
-const CRATE_RESPAWN = 10;
-/** How long the web takes to fetch a crate to the hand. */
-const CRATE_PULL = 0.22;
 const CRATE_SPEED = 80;
+/** Something thrown off the web sits where it lands this long, then goes home. */
+const PICKUP_RETURN = 7;
+/** How long a thrown thing takes to fade out before it reappears at home. */
+const PICKUP_FADE = 0.6;
+/** Pull per metre of stretch on something held, and how fast it settles. */
+const HOLD_SPRING = 38;
+const HOLD_DAMPING = 5.5;
+const PICKUP_GRAVITY = 30;
+/** Moving faster than this, a thrown thing knocks over whoever it hits. */
+const PICKUP_HIT_SPEED = 7;
 const CRATE_RADIUS = 1.6;
 /** A shot this close and heading at the player is a threat a dodge can beat. */
 const THREAT_DISTANCE = 14;
@@ -65,14 +71,32 @@ export interface Shot {
   crate?: boolean;
 }
 
-/** A loose crate: sitting at home, flying to a hand, or gone until it comes back. */
-export interface Crate {
+/**
+ * Something loose the web can grab: a crate, or a car parked on the street. It sits at
+ * home, hangs on a held web, flies after being let go, then fades and comes home, so
+ * the city never stays wrecked.
+ */
+export interface Pickup {
   id: number;
+  kind: 'crate' | 'car';
   home: V3;
   pos: V3;
-  state: 'idle' | 'pulled' | 'gone';
+  vel: V3;
+  state: 'idle' | 'held' | 'thrown' | 'gone';
+  /** Thrown: time left before it goes home. Gone: time left fading. */
   t: number;
+  /** Tumbling while it flies, in radians. */
+  spin: number;
+  /** A car: which parked car it is, and its solid box, moved out of the way while it's off home. */
+  car?: number;
+  box?: Box;
+  homeBox?: { min: V3; max: V3 };
+  /** Who it has already hit on this throw. */
+  hit: number[];
 }
+
+/** Also called crates, from when crates were the only loose things. */
+export type Crate = Pickup;
 
 interface Hit {
   kind: HitKind;
@@ -88,6 +112,7 @@ export type WorldEvent =
   | { type: 'snare'; id: number }
   | { type: 'netHit'; target: number; snare: boolean; kind: HitKind; knock?: V3; stun?: number; pin?: boolean; power?: number }
   | { type: 'crateThrown'; origin: V3; dir: V3 }
+  | { type: 'pickupHit'; pickup: number }
   | { type: 'outOfBounds'; yaw: number }
   | { type: 'ring'; index: number }
   | { type: 'lap'; time: number; best: boolean };
@@ -96,7 +121,7 @@ export class World {
   player: Player;
   dummies: Dummy[];
   shots: Shot[] = [];
-  crates: Crate[];
+  pickups: Pickup[];
   events: WorldEvent[] = [];
   danger: DangerState = createDanger();
   private time = 0;
@@ -120,7 +145,33 @@ export class World {
     this.bestLap = bestLap;
     this.player = createPlayer(this.map.spawn, this.map.spawnYaw);
     this.dummies = this.createDummies();
-    this.crates = this.map.crates.map((home, id) => ({ id, home, pos: { ...home }, state: 'idle', t: 0 }));
+    this.pickups = this.createPickups();
+  }
+
+  /** Crates first, then every parked car in the street grid, each with its own solid box. */
+  private createPickups(): Pickup[] {
+    const loose = (id: number, kind: Pickup['kind'], home: V3): Pickup => ({
+      id, kind, home, pos: { ...home }, vel: { x: 0, y: 0, z: 0 }, state: 'idle', t: 0, spin: 0, hit: [],
+    });
+    const list = this.map.crates.map((home, id) => loose(id, 'crate', home));
+    const cars = this.map.scenery?.cars ?? [];
+    const props = this.map.boxes.filter((b) => b.kind === 'prop' && b.max.y <= 1.6);
+    cars.forEach((c, i) => {
+      const box = props.find((b) => Math.abs((b.min.x + b.max.x) / 2 - c.x) < 0.01 && Math.abs((b.min.z + b.max.z) / 2 - c.z) < 0.01);
+      const p = loose(list.length, 'car', { x: c.x, y: 0, z: c.z });
+      p.car = i;
+      if (box) {
+        p.box = box;
+        p.homeBox = { min: { ...box.min }, max: { ...box.max } };
+      }
+      list.push(p);
+    });
+    return list;
+  }
+
+  /** The crates alone, for drawing them. */
+  get crates(): Pickup[] {
+    return this.pickups.filter((p) => p.kind === 'crate');
   }
 
   private createDummies(): Dummy[] {
@@ -170,7 +221,9 @@ export class World {
 
   step(input: TickInput, dt: number): void {
     const gameEvents: GameEvent[] = [];
-    const crates = this.crates.filter((c) => c.state === 'idle').map(({ id, pos }) => ({ id, pos }));
+    const crates = this.pickups
+      .filter((c) => c.state === 'idle' || c.state === 'held')
+      .map(({ id, pos, kind }) => ({ id, pos: kind === 'car' ? { ...pos, y: pos.y + 0.4 } : pos, size: kind === 'car' ? 2.2 : 1 }));
     const enemies = this.dummies.filter((d) => !d.ally);
     stepPlayer(this.player, input, this.map, enemies, dt, gameEvents, { threatened: this.threatened(), crates, online: this.online });
     this.events.push(...gameEvents);
@@ -188,18 +241,35 @@ export class World {
         case 'heal':
           if (!this.online) healPlayer(this.player, e.amount);
           break;
-        case 'pullCrate': {
-          const crate = this.crates.find((c) => c.id === e.crate);
-          if (crate?.state === 'idle') {
-            crate.state = 'pulled';
-            crate.t = CRATE_PULL;
+        case 'grab': {
+          const thing = this.pickups.find((c) => c.id === e.pickup);
+          if (thing && thing.state === 'idle') {
+            thing.state = 'held';
+            thing.hit = [];
+            thing.vel = { x: 0, y: 0, z: 0 };
+            // A car leaves its solid box behind while it's away, so nothing bumps into air.
+            if (thing.box) {
+              thing.box.min = { x: 0, y: -200, z: 0 };
+              thing.box.max = { x: 0, y: -199, z: 0 };
+            }
+          }
+          break;
+        }
+        case 'letGo': {
+          const thing = this.pickups.find((c) => c.id === e.pickup);
+          if (thing?.state === 'held') {
+            thing.state = 'thrown';
+            thing.t = PICKUP_RETURN;
+            thing.vel = { x: thing.vel.x + e.fling.x, y: thing.vel.y + e.fling.y, z: thing.vel.z + e.fling.z };
+            const speed = Math.hypot(thing.vel.x, thing.vel.y, thing.vel.z) || 1;
+            this.events.push({ type: 'crateThrown', origin: { ...thing.pos }, dir: { x: thing.vel.x / speed, y: thing.vel.y / speed, z: thing.vel.z / speed } });
           }
           break;
         }
       }
     }
 
-    this.stepCrates(dt);
+    this.stepPickups(dt);
     this.stepShots(dt);
     if (!this.online) {
       this.stepDummies(dt);
@@ -208,6 +278,11 @@ export class World {
     }
     stepDanger(this.danger, this.player, enemies, this.map, dt);
     this.keepInBounds();
+  }
+
+  /** For someone only watching: other players' shots still fly, but nobody is simulated here. */
+  stepWatching(dt: number): void {
+    this.stepShots(dt);
   }
 
   /**
@@ -248,50 +323,92 @@ export class World {
     return Math.max(d.top, d.right, d.bottom, d.left) >= 0.6;
   }
 
-  /** Crates fly to the hand that fetched them, then on along the crosshair. */
-  private stepCrates(dt: number): void {
-    const p = this.player;
-    for (const c of this.crates) {
+  /**
+   * Things on the web hang off it like on elastic: pulled toward a point in front of
+   * the player, harder the further they're stretched, and settling as they get there.
+   * Let go, they fly and fall, knock over whoever they hit, then go home.
+   */
+  private stepPickups(dt: number): void {
+    const hold = holdPoint(this.player);
+    for (const c of this.pickups) {
+      if (c.state === 'idle') continue;
       if (c.state === 'gone') {
         c.t -= dt;
-        if (c.t <= 0) {
-          c.state = 'idle';
-          c.pos = { ...c.home };
-        }
+        if (c.t <= 0) this.sendHome(c);
         continue;
       }
-      if (c.state !== 'pulled') continue;
-
-      const hand = handPosition(p);
-      const k = Math.min(1, dt / Math.max(dt, c.t));
-      c.pos = {
-        x: c.pos.x + (hand.x - c.pos.x) * k,
-        y: c.pos.y + (hand.y - c.pos.y) * k,
-        z: c.pos.z + (hand.z - c.pos.z) * k,
-      };
-      c.t -= dt;
-      if (c.t > 0) continue;
-
-      const target = this.dummies.find((x) => x.id === p.targetPreview && x.respawnT === 0);
-      const eye = eyePosition(p);
-      const aim = target ? dummyCenter(target) : null;
-      const look = viewForward(p.yaw, p.pitch);
-      let dir = look;
-      if (aim) {
-        const len = Math.hypot(aim.x - hand.x, aim.y - hand.y, aim.z - hand.z) || 1;
-        dir = { x: (aim.x - hand.x) / len, y: (aim.y - hand.y) / len, z: (aim.z - hand.z) / len };
-      } else {
-        // Straight at whatever the crosshair is on, from the hand.
-        const hit = raycast(this.map, eye, look, TUNING.shotRange);
-        const end = hit ? hit.point : { x: eye.x + look.x * 60, y: eye.y + look.y * 60, z: eye.z + look.z * 60 };
-        const len = Math.hypot(end.x - hand.x, end.y - hand.y, end.z - hand.z) || 1;
-        dir = { x: (end.x - hand.x) / len, y: (end.y - hand.y) / len, z: (end.z - hand.z) / len };
+      if (c.state === 'held' && this.player.holding !== c.id) {
+        // The web broke without a throw: it drops where it is.
+        c.state = 'thrown';
+        c.t = PICKUP_RETURN;
       }
-      const origin = { ...hand };
-      this.shots.push({ pos: origin, dir, snare: false, travelled: 0, crate: true });
-      this.events.push({ type: 'crateThrown', origin: { ...origin }, dir: { ...dir } });
-      c.state = 'gone';
-      c.t = CRATE_RESPAWN;
+      if (c.state === 'held') {
+        c.vel.x += (hold.x - c.pos.x) * HOLD_SPRING * dt;
+        c.vel.y += (hold.y - c.pos.y) * HOLD_SPRING * dt;
+        c.vel.z += (hold.z - c.pos.z) * HOLD_SPRING * dt;
+        const keep = Math.exp(-HOLD_DAMPING * dt);
+        c.vel.x *= keep;
+        c.vel.y *= keep;
+        c.vel.z *= keep;
+      } else {
+        c.vel.y -= PICKUP_GRAVITY * dt;
+        c.t -= dt;
+        if (c.t <= 0) {
+          c.state = 'gone';
+          c.t = PICKUP_FADE;
+          continue;
+        }
+      }
+      this.movePickup(c, dt);
+    }
+  }
+
+  /** Moves a loose thing, stopping it at walls and floors, and knocks over whoever it hits. */
+  private movePickup(c: Pickup, dt: number): void {
+    const speed = Math.hypot(c.vel.x, c.vel.y, c.vel.z);
+    if (speed > 0.01) {
+      const dir = { x: c.vel.x / speed, y: c.vel.y / speed, z: c.vel.z / speed };
+      const lift = c.kind === 'car' ? 0.8 : 0.4;
+      const hit = raycast(this.map, { x: c.pos.x, y: c.pos.y + lift, z: c.pos.z }, dir, speed * dt + 0.5);
+      if (hit) {
+        // Bounce a little off whatever it hit, losing most of its speed.
+        c.vel = { x: -c.vel.x * 0.15, y: Math.max(0, -c.vel.y * 0.2), z: -c.vel.z * 0.15 };
+      } else {
+        c.pos.x += c.vel.x * dt;
+        c.pos.y += c.vel.y * dt;
+        c.pos.z += c.vel.z * dt;
+      }
+    }
+    const floor = raycast(this.map, { x: c.pos.x, y: c.pos.y + 1, z: c.pos.z }, DOWN, 1.05);
+    if (floor && c.vel.y <= 0) {
+      c.pos.y = floor.point.y;
+      c.vel.y = 0;
+      const keep = Math.exp(-4 * dt);
+      c.vel.x *= keep;
+      c.vel.z *= keep;
+    }
+    c.spin += Math.min(speed, 20) * dt * (c.state === 'held' ? 0.15 : 0.35);
+
+    if (speed < PICKUP_HIT_SPEED) return;
+    const reach = c.kind === 'car' ? 2.4 : 1.4;
+    for (const d of this.dummies) {
+      if (d.respawnT > 0 || d.ally || c.hit.includes(d.id)) continue;
+      const centre = dummyCenter(d);
+      if (Math.hypot(centre.x - c.pos.x, centre.y - c.pos.y - 0.5, centre.z - c.pos.z) > reach) continue;
+      c.hit.push(d.id);
+      const k = 0.6;
+      this.applyHit(d, { kind: 'crate', knock: { x: c.vel.x * k, y: 5, z: c.vel.z * k }, stun: 0.8 });
+    }
+  }
+
+  private sendHome(c: Pickup): void {
+    c.state = 'idle';
+    c.pos = { ...c.home };
+    c.vel = { x: 0, y: 0, z: 0 };
+    c.spin = 0;
+    if (c.box && c.homeBox) {
+      c.box.min = { ...c.homeBox.min };
+      c.box.max = { ...c.homeBox.max };
     }
   }
 

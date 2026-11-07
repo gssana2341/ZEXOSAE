@@ -1,6 +1,8 @@
 // The arena is built only from axis-aligned boxes. This keeps collision cheap
 // and lets a future game server reuse this file without Three.js.
 
+import { buildCity, type Scenery } from './city';
+
 export interface V3 {
   x: number;
   y: number;
@@ -46,6 +48,8 @@ export interface GameMap {
   patrols: Patrol[];
   /** Loose crates the web can fetch and throw. Nothing solid, so they never block a run. */
   crates: V3[];
+  /** Roads, parks, parked cars and trees, for drawing. Their collision is already in boxes. */
+  scenery?: Scenery;
 }
 
 export const RING_RADIUS = 4.5;
@@ -114,23 +118,10 @@ export function createArena(): GameMap {
     }
   }
 
-  // Additional neighbourhoods continue the streets and provide nearby swing points.
-  const outerSpawns: V3[] = [];
-  for (let gx = -7; gx <= 7; gx += 1) {
-    for (let gz = -7; gz <= 7; gz += 1) {
-      if (Math.max(Math.abs(gx), Math.abs(gz)) <= 2) continue;
-      const x = gx * 56;
-      const z = gz * 56;
-      const seed = Math.abs(gx * 37 + gz * 53 + gx * gz * 11);
-      const w = 24 + (seed % 4) * 4;
-      const d = 24 + (Math.floor(seed / 4) % 4) * 4;
-      const height = 28 + (Math.floor(seed / 7) % 10) * 7;
-      add(block(x, z, w, d, 0, height, 'building', seed % 2 ? 'glass' : 'brick'));
-      if (Math.max(Math.abs(gx), Math.abs(gz)) === 4 && gx % 4 === 0 && gz % 4 === 0) {
-        outerSpawns.push(v(x, height + 0.05, z));
-      }
-    }
-  }
+  // The street grid around the district: varied blocks, parks, car parks and parked cars.
+  const city = buildCity();
+  add(...city.boxes);
+  const outerSpawns = city.spawns;
 
   // A continuous, varied skyline forms the city edge, like the original district.
   const edge = ARENA_LIMIT - 15;
@@ -204,6 +195,7 @@ export function createArena(): GameMap {
 
   return {
     boxes,
+    scenery: city.scenery,
     spawn,
     spawnYaw: 0,
     spawns: [

@@ -78,6 +78,45 @@ async function ownedRoom(store: Store, code: unknown, hostKey: unknown): Promise
   return room && room.hostKey === hostKey ? room : null;
 }
 
+type IceServer = { urls: string | string[]; username?: string; credential?: string };
+
+/**
+ * Relay (TURN) servers, for players whose network won't let two browsers connect
+ * directly: the same Wi-Fi, some mobile networks, offices. Cloudflare's are made
+ * fresh here, so the key never reaches a browser. Without either setting, the game
+ * still connects directly where it can.
+ */
+async function relayServers(): Promise<IceServer[]> {
+  const keyId = process.env.CLOUDFLARE_TURN_KEY_ID;
+  const token = process.env.CLOUDFLARE_TURN_API_TOKEN;
+  if (keyId && token) {
+    try {
+      const response = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${keyId}/credentials/generate-ice-servers`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ttl: 86400 }),
+      });
+      if (response.ok) {
+        const body = (await response.json()) as { iceServers?: IceServer[] | IceServer };
+        const list = Array.isArray(body.iceServers) ? body.iceServers : body.iceServers ? [body.iceServers] : [];
+        return list.map(withoutPort53).filter((s) => [s.urls].flat().length > 0);
+      }
+    } catch {
+      // Fall through to the fixed servers, if any.
+    }
+  }
+  const urls = process.env.TURN_URLS?.split(',').map((u) => u.trim()).filter(Boolean);
+  if (urls?.length) {
+    return [{ urls, username: process.env.TURN_USERNAME, credential: process.env.TURN_CREDENTIAL }];
+  }
+  return [];
+}
+
+/** Browsers block port 53, and waiting on it only slows the connection down. */
+function withoutPort53(server: IceServer): IceServer {
+  return { ...server, urls: [server.urls].flat().filter((url) => !/:53(\?|$)/.test(url)) };
+}
+
 export async function handle(request: Request, store: Store | null): Promise<Response> {
   if (!store) return fail('no-store', 503);
 
@@ -86,10 +125,18 @@ export async function handle(request: Request, store: Store | null): Promise<Res
     const open = (r: RoomRecord) => (r.players < r.max ? 1 : 0);
     return json({
       rooms: rooms
-        .filter((r) => !r.private && (!r.mode || isGameMode(r.mode)))
+        .filter((r) => !r.mode || isGameMode(r.mode))
         .sort((a, b) => open(b) - open(a) || b.players - a.players)
         .slice(0, MAX_LISTED_ROOMS)
-        .map(({ code, host, players, max, mode }) => ({ code, host, players, max, mode: isGameMode(mode) ? mode : 'deathmatch' })),
+        // A private room shows on the board, but never its code: that comes from the host.
+        .map(({ code, host, players, max, mode, private: hidden }) => ({
+          code: hidden ? '' : code,
+          host,
+          players,
+          max,
+          mode: isGameMode(mode) ? mode : 'deathmatch',
+          private: hidden === true,
+        })),
     });
   }
   if (request.method !== 'POST') return fail('method', 405);
@@ -105,6 +152,9 @@ export async function handle(request: Request, store: Store | null): Promise<Res
   }
 
   switch (m.action) {
+    case 'ice':
+      return json({ iceServers: await relayServers() });
+
     case 'create': {
       const hostKey = crypto.randomUUID();
       const max = clampSize(m.max, 2, 16, 8);

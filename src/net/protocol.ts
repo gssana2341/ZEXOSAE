@@ -72,15 +72,17 @@ export interface PlayerSnapshot {
 }
 
 export interface RoomSummary {
+  /** Empty for a private room: its code only comes from the host. */
   code: string;
   host: string;
   players: number;
   max: number;
   mode: GameMode;
+  private?: boolean;
 }
 
 export type ClientMessage =
-  | { t: 'join'; code: string; name: string }
+  | { t: 'join'; code: string; name: string; watch?: boolean }
   | { t: 'state'; pos: Vec; yaw: number; pitch: number; anchor: Vec | null; mode?: PoseMode; motion?: Mode; safe?: boolean }
   | { t: 'shot'; origin: Vec; dir: Vec; snare: boolean; crate?: boolean }
   | { t: 'hit'; target: number; snare: boolean; kind?: HitKind; knock?: Vec; stun?: number; pin?: boolean; power?: number }
@@ -89,7 +91,7 @@ export type ClientMessage =
 
 
 export type ServerMessage =
-  | { t: 'joined'; code: string; id: number; players: PlayerInfo[]; pos: Vec; yaw: number; match: MatchState }
+  | { t: 'joined'; code: string; id: number; players: PlayerInfo[]; pos: Vec; yaw: number; match: MatchState; watching?: boolean }
   | { t: 'error'; reason: 'full' }
   | { t: 'pong'; at: number }
   | { t: 'playerJoin'; player: PlayerInfo }
@@ -121,7 +123,7 @@ export function parseClientMessage(raw: string): ClientMessage | null {
   switch (m.t) {
     case 'join':
       return isText(m.code, 16) && isText(m.name, 64)
-        ? { t: 'join', code: m.code, name: m.name }
+        ? { t: 'join', code: m.code, name: m.name, watch: m.watch === true }
         : null;
     case 'state':
       return isVec(m.pos) && isNumber(m.yaw) && isNumber(m.pitch) && (m.anchor === null || isVec(m.anchor))

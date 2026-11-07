@@ -4,7 +4,7 @@ import { NodeIO } from '@gltf-transform/core';
 import { KHRTextureTransform } from '@gltf-transform/extensions';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { describe, expect, it } from 'vitest';
-import { cutAbove, flushShell } from '../src/render/kenney';
+import { cutAbove, flushShell, withoutSlivers } from '../src/render/kenney';
 import { shellFor, usedModels } from '../src/render/shells';
 import { createArena, type Box } from '../src/sim/map';
 
@@ -122,5 +122,28 @@ describe('Kenney models', () => {
       }
       expect(separated, name).toBeGreaterThan(0);
     }
+  });
+});
+
+describe('sliver triangles', () => {
+  it('drops long hair-thin triangles and keeps real faces', () => {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute(
+      'position',
+      new THREE.Float32BufferAttribute(
+        [
+          // A proper wall face.
+          0, 0, 0, 10, 0, 0, 10, 10, 0,
+          // A 20 m long, 2 cm wide sliver.
+          0, 5, 0, 20, 5, 0, 10, 5.02, 0,
+          // A small triangle, thin but short: real trim, kept.
+          0, 0, 1, 1, 0, 1, 0.5, 0.01, 1,
+        ],
+        3,
+      ),
+    );
+    g.setIndex([0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    const out = withoutSlivers(g);
+    expect(Array.from(out.getIndex()!.array)).toEqual([0, 1, 2, 6, 7, 8]);
   });
 });
