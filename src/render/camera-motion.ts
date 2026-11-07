@@ -47,6 +47,16 @@ const TREMBLE_SPEED = 22;
 const TREMBLE_RANGE = 18;
 const TREMBLE_SIZE = 0.016;
 
+/** Speed widens the view; a fast dive adds a little extra without a sudden jump. */
+export function speedFovBoost(speed: number, fallSpeed: number, thirdPerson: boolean, reduceMotion: boolean, enabled: boolean): number {
+  if (!enabled) return 0;
+  const cap = reduceMotion ? 4 : thirdPerson ? 14 : 20;
+  const rate = reduceMotion ? 0.15 : thirdPerson ? 0.45 : 0.7;
+  const movement = Math.min(cap, Math.max(0, speed - 11) * rate);
+  const dive = reduceMotion ? 0 : Math.min(thirdPerson ? 3 : 4, Math.max(0, fallSpeed - 25) * 0.1);
+  return movement + dive;
+}
+
 export function createCameraMotion(): CameraMotion {
   return { stridePhase: 0, strideAmount: 0, lean: 0, dip: 0, dipSpeed: 0, time: 0 };
 }

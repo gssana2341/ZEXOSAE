@@ -1,13 +1,13 @@
 // Loads the Kenney city models and bakes them into independently culled city chunks
 // before the game starts, so running through the map never swaps building models.
 
-import { scatterWindows } from './lighting';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import type { GameMap } from '../sim/map';
 import { farTowers } from './arena';
 import { yieldToBrowser } from './performance';
+import { cityWindowLights } from './window-lights';
 import { FAR_MODELS, shellFor, usedModels } from './shells';
 
 const BASE = '/models/kenney/';
@@ -291,40 +291,9 @@ export interface KenneyCity {
   city: THREE.Group;
   /** Distant towers. */
   far: THREE.Mesh;
-  /** The buildings' material and the distant towers', for the time of day to light. */
-  walls: THREE.MeshLambertMaterial;
+  /** Window lights stay in ordered rows on the buildings. */
+  panes: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
   farMaterial: THREE.MeshLambertMaterial;
-}
-
-/**
- * A mask of the atlas with only its window glass kept, in a warm lamp colour. As
- * the emissive map it lights the windows at night and nothing else.
- */
-function glassGlow(atlas: THREE.Texture | null): THREE.Texture | null {
-  const image = atlas?.image as (CanvasImageSource & { width: number; height: number }) | undefined;
-  if (!image?.width) return null;
-  const canvas = document.createElement('canvas');
-  canvas.width = image.width;
-  canvas.height = image.height;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return null;
-  ctx.drawImage(image, 0, 0);
-  const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const d = pixels.data;
-  for (let i = 0; i < d.length; i += 4) {
-    const [r, g, b] = [d[i], d[i + 1], d[i + 2]];
-    // Glass in the kit is a clear light blue: bluer than it is red, and bright.
-    const glass = b > 140 && b > r + 25 && g > r;
-    d[i] = glass ? 255 : 0;
-    d[i + 1] = glass ? 206 : 0;
-    d[i + 2] = glass ? 130 : 0;
-  }
-  ctx.putImageData(pixels, 0, 0);
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.flipY = atlas!.flipY;
-  texture.colorSpace = THREE.SRGBColorSpace;
-  texture.magFilter = THREE.NearestFilter;
-  return texture;
 }
 
 export async function loadKenneyCity(map: GameMap, maxAnisotropy = 1): Promise<KenneyCity> {
@@ -363,15 +332,10 @@ export async function loadKenneyCity(map: GameMap, maxAnisotropy = 1): Promise<K
     atlas.anisotropy = Math.max(1, Math.min(4, maxAnisotropy));
     atlas.needsUpdate = true;
   }
-  const glow = glassGlow(atlas);
   const wallMaterial = new THREE.MeshLambertMaterial({
     map: atlas,
     vertexColors: true,
-    emissiveMap: glow,
-    emissive: new THREE.Color(glow ? '#ffffff' : '#000000'),
-    emissiveIntensity: 0,
   });
-  scatterWindows(wallMaterial);
   for (const chunk of chunks.values()) {
     const walls = mergedMesh(chunk.parts, wallMaterial);
     for (const part of chunk.parts) part.dispose();
@@ -388,7 +352,8 @@ export async function loadKenneyCity(map: GameMap, maxAnisotropy = 1): Promise<K
   }
 
   const farParts: THREE.BufferGeometry[] = [];
-  for (const [i, tower] of farTowers().entries()) {
+  const skyline = farTowers();
+  for (const [i, tower] of skyline.entries()) {
     farParts.push(fitted(
       get(FAR_MODELS[i % FAR_MODELS.length]),
       i % 4,
@@ -403,14 +368,11 @@ export async function loadKenneyCity(map: GameMap, maxAnisotropy = 1): Promise<K
   const farMaterial = new THREE.MeshLambertMaterial({
     map: kitOf(FAR_MODELS[0]),
     color: '#8a93c4',
-    emissiveMap: glassGlow(kitOf(FAR_MODELS[0])),
-    emissive: new THREE.Color('#ffffff'),
-    emissiveIntensity: 0,
   });
-  scatterWindows(farMaterial);
   const far = mergedMesh(farParts, farMaterial);
   for (const part of farParts) part.dispose();
   far.geometry.computeBoundingSphere();
 
-  return { city, far, walls: wallMaterial, farMaterial };
+  const panes = cityWindowLights(map.boxes, skyline, maxAnisotropy);
+  return { city, far, panes, farMaterial };
 }

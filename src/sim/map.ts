@@ -24,6 +24,8 @@ export interface Box {
   max: V3;
   kind: BoxKind;
   style?: BoxStyle;
+  /** The tallest tower has a regular facade and an open viewing roof. */
+  landmark?: 'observation';
 }
 
 export interface Patrol {

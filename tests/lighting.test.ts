@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { blendLooks, cycleAt, LOOKS } from '../src/render/lighting';
+import * as THREE from 'three';
+import { blendLooks, cycleAt, Lighting, LOOKS } from '../src/render/lighting';
 import { buildCity } from '../src/sim/city';
 
 describe('time of day', () => {
@@ -15,7 +16,22 @@ describe('time of day', () => {
     expect(LOOKS.day.lamps).toBe(0);
     expect(LOOKS.night.lamps).toBe(1);
     expect(LOOKS.night.glass).toBeGreaterThan(LOOKS.sunset.glass);
-    expect(LOOKS.night.stars).toBe(1);
+    expect(LOOKS.night.stars).toBeGreaterThan(0);
+    expect(LOOKS.morning.lamps).toBe(0);
+  });
+
+  it('shows the prepared window lights at night and hides them in the morning', () => {
+    const renderer = { toneMappingExposure: 1, shadowMap: { needsUpdate: false } } as THREE.WebGLRenderer;
+    const lighting = new Lighting(new THREE.Scene(), new THREE.DirectionalLight(), new THREE.HemisphereLight(), renderer);
+    lighting.set('night');
+    const panes = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial());
+    lighting.lit.panes.push(panes);
+    lighting.refresh();
+    expect(panes.visible).toBe(true);
+    expect(panes.material.opacity).toBeGreaterThan(0);
+    lighting.set('morning');
+    expect(panes.visible).toBe(false);
+    expect(panes.material.opacity).toBe(0);
   });
 
   it('cycles through day, evening and night, holding each for a while', () => {
@@ -28,7 +44,7 @@ describe('time of day', () => {
       expect(at.k).toBeGreaterThanOrEqual(0);
       expect(at.k).toBeLessThanOrEqual(1);
     }
-    expect([...seen].sort()).toEqual(['day', 'night', 'sunset']);
+    expect([...seen].sort()).toEqual(['day', 'morning', 'night', 'sunset']);
     // Mostly holding, with short changes between.
     expect(changes).toBeLessThan(80);
   });

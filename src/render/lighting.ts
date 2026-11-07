@@ -5,11 +5,12 @@
 
 import * as THREE from 'three';
 
-export type TimeOfDay = 'day' | 'sunset' | 'night';
+export type TimeOfDay = 'morning' | 'day' | 'sunset' | 'night';
 export type SkyChoice = TimeOfDay | 'cycle';
 
-export const SKY_CHOICES: SkyChoice[] = ['sunset', 'day', 'night', 'cycle'];
+export const SKY_CHOICES: SkyChoice[] = ['morning', 'day', 'sunset', 'night', 'cycle'];
 export const SKY_LABELS: Record<SkyChoice, string> = {
+  morning: 'เช้า',
   sunset: 'เย็น',
   day: 'กลางวัน',
   night: 'กลางคืน',
@@ -48,6 +49,30 @@ export interface Look {
 }
 
 export const LOOKS: Record<TimeOfDay, Look> = {
+  morning: {
+    skyLow: '#ffe1ae',
+    skyMid: '#cddff0',
+    skyHigh: '#79a8d4',
+    fog: '#e7d2b7',
+    fogNear: 300,
+    fogFar: 1400,
+    hemiSky: '#e4edff',
+    hemiGround: '#978c7d',
+    hemi: 2.0,
+    sun: '#ffd39b',
+    sunPower: 3.4,
+    sunDir: [-0.72, 0.36, 0.6],
+    disc: '#fff2d4',
+    discSize: 30,
+    exposure: 1.12,
+    clouds: '#fff2e1',
+    land: '#777887',
+    far: '#c5b8ae',
+    windows: 0.08,
+    glass: 0,
+    lamps: 0,
+    stars: 0,
+  },
   day: {
     skyLow: '#d6ebff',
     skyMid: '#93c4f2',
@@ -98,33 +123,34 @@ export const LOOKS: Record<TimeOfDay, Look> = {
     stars: 0,
   },
   night: {
-    skyLow: '#26305e',
-    skyMid: '#121a3a',
-    skyHigh: '#04060e',
-    fog: '#161c38',
-    fogNear: 170,
-    fogFar: 950,
-    hemiSky: '#5a6cb0',
-    hemiGround: '#1c1c2a',
-    hemi: 1,
-    sun: '#a9bcff',
-    sunPower: 0.85,
+    skyLow: '#514938',
+    skyMid: '#20222c',
+    skyHigh: '#070b15',
+    fog: '#3b3835',
+    fogNear: 240,
+    fogFar: 1150,
+    hemiSky: '#8796b6',
+    hemiGround: '#39332e',
+    hemi: 0.95,
+    sun: '#b9c9e3',
+    sunPower: 0.8,
     sunDir: [0.45, 0.62, -0.5],
     disc: '#eef2ff',
     discSize: 17,
-    exposure: 1.15,
-    clouds: '#323a66',
-    land: '#0c0f1e',
-    far: '#3a4170',
-    windows: 1.5,
-    glass: 1.6,
+    exposure: 1.08,
+    clouds: '#45413e',
+    land: '#1d2028',
+    far: '#66615a',
+    windows: 0.9,
+    glass: 1.35,
     lamps: 1,
-    stars: 1,
+    stars: 0.4,
   },
 };
 
 /** How long each stop of the cycle holds, and how long the change between stops takes, in seconds. */
 const CYCLE: Array<[TimeOfDay, number]> = [
+  ['morning', 45],
   ['day', 70],
   ['sunset', 50],
   ['night', 90],
@@ -167,42 +193,12 @@ export function cycleAt(seconds: number): { from: TimeOfDay; to: TimeOfDay; k: n
   return { from: 'day', to: 'day', k: 0 };
 }
 
-/**
- * Lights windows in a scatter rather than all at once: the world is cut into cells
- * about one window wide and one storey tall, and each cell is lit or dark by a fixed
- * hash of where it is. Every building ends up with its own pattern, like a real
- * city at night, and the pattern never flickers because it never changes.
- */
-export function scatterWindows(material: THREE.Material): void {
-  material.onBeforeCompile = (shader) => {
-    shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', `#include <common>
-varying vec3 vCityPos;`)
-      .replace('#include <begin_vertex>', `#include <begin_vertex>
-vCityPos = (modelMatrix * vec4(transformed, 1.0)).xyz;`);
-    shader.fragmentShader = shader.fragmentShader
-      .replace(
-        '#include <common>',
-        `#include <common>
-varying vec3 vCityPos;
-float cityHash(vec3 p) { return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453); }`,
-      )
-      .replace(
-        '#include <emissivemap_fragment>',
-        `#include <emissivemap_fragment>
-{ float h = cityHash(floor(vCityPos / vec3(2.6, 3.2, 2.6))); totalEmissiveRadiance *= step(0.45, h) * (0.5 + 0.5 * h); }`,
-      );
-  };
-  material.customProgramCacheKey = () => 'scatter-windows';
-  material.needsUpdate = true;
-}
-
 /** Things outside this file that change with the light. */
 export interface Lit {
   /** Window materials: their emissive intensity is set from the look. */
   windows: THREE.MeshLambertMaterial[];
-  /** Modelled buildings, whose glass glows through an emissive mask at night. */
-  glass: THREE.MeshLambertMaterial[];
+  /** Neat rows of light on modelled buildings, drawn only after dark. */
+  panes: Array<THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>>;
   far: THREE.MeshLambertMaterial[];
   clouds: THREE.MeshBasicMaterial[];
   land: THREE.MeshBasicMaterial[];
@@ -212,7 +208,7 @@ export interface Lit {
 
 export class Lighting {
   readonly group = new THREE.Group();
-  readonly lit: Lit = { windows: [], glass: [], far: [], clouds: [], land: [], lamps: [] };
+  readonly lit: Lit = { windows: [], panes: [], far: [], clouds: [], land: [], lamps: [] };
   private readonly dome: THREE.Mesh;
   private readonly disc: THREE.Mesh;
   private readonly stars: THREE.Points;
@@ -313,7 +309,10 @@ export class Lighting {
     this.renderer.toneMappingExposure = look.exposure;
 
     for (const m of this.lit.windows) m.emissiveIntensity = look.windows;
-    for (const m of this.lit.glass) m.emissiveIntensity = look.glass;
+    for (const pane of this.lit.panes) {
+      pane.visible = look.glass > 0.01;
+      pane.material.opacity = Math.min(0.68, look.glass * 0.43);
+    }
     for (const m of this.lit.far) {
       m.color.set(look.far);
       m.emissiveIntensity = look.glass;

@@ -24,7 +24,7 @@ import {
   type LimbPose,
   type Side,
 } from './body-pose';
-import { createCameraMotion, landCamera, stepCameraMotion } from './camera-motion';
+import { createCameraMotion, landCamera, speedFovBoost, stepCameraMotion } from './camera-motion';
 import { createChaseCamera, resetChaseCamera, stepChaseCamera } from './chase-camera';
 import type { FirstPersonArms, HeroBody } from './hero';
 import { buildCharacter, paintCharacter, paletteFor, PALETTES, type CharacterView } from './character';
@@ -417,9 +417,9 @@ export class GameView {
   /** Swaps in the complete Kenney city before the loading screen closes. */
   private async loadCity(map: GameMap, placeholders: THREE.Object3D[]): Promise<void> {
     const { loadKenneyCity } = await import('./kenney');
-    const { city, far, walls, farMaterial } = await loadKenneyCity(map, this.renderer.capabilities.getMaxAnisotropy());
-    this.scene.add(city, far);
-    this.lighting.lit.glass.push(walls);
+    const { city, far, panes, farMaterial } = await loadKenneyCity(map, this.renderer.capabilities.getMaxAnisotropy());
+    this.scene.add(city, far, panes);
+    this.lighting.lit.panes.push(panes);
     this.lighting.lit.far.push(farMaterial);
     this.lighting.refresh();
     for (const mesh of placeholders) mesh.visible = false;
@@ -627,9 +627,9 @@ export class GameView {
     }
 
     const speed = totalSpeed(p);
-    // A wide view shrinks the hero on screen, so third person widens far less with speed.
-    const maxBoost = reduce ? 4 : third ? 14 : 20;
-    const boostTarget = this.settings.speedZoom ? Math.min(maxBoost, Math.max(0, speed - 11) * (reduce ? 0.15 : third ? 0.45 : 0.7)) : 0;
+    // Keep the familiar speed effect and add a gentle stretch in a fast free fall.
+    const fallSpeed = p.mode === 'air' || p.mode === 'pound' ? Math.max(0, -p.vel.y) : 0;
+    const boostTarget = speedFovBoost(speed, fallSpeed, third, reduce, this.settings.speedZoom);
     this.fovBoost += (boostTarget - this.fovBoost) * blend(6);
     const baseFov = third ? Math.min(this.settings.fov, THIRD_PERSON_FOV) : this.settings.fov;
     this.camera.fov = baseFov + this.fovBoost;

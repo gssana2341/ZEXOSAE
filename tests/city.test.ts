@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { BLOCK, buildCity, CAR_SIZE, CITY_FROM, ROAD_WIDTH } from '../src/sim/city';
-import { createArena, type Box } from '../src/sim/map';
-import { TUNING } from '../src/sim/player';
+import { BLOCK, buildCity, CAR_SIZE, CITY_FROM, OBSERVATION_TOWER, ROAD_WIDTH } from '../src/sim/city';
+import { createArena, raycast, type Box } from '../src/sim/map';
+import { emptyInput, TUNING } from '../src/sim/player';
+import { TICK, World } from '../src/sim/world';
 
 const city = buildCity();
 const map = createArena();
@@ -16,6 +17,20 @@ function onRoad(box: Box): boolean {
 }
 
 describe('the street grid', () => {
+  it('has a distinctive, walkable observation roof above the rest of the city', () => {
+    const tower = map.boxes.find((box) => box.landmark === 'observation')!;
+    expect(tower).toBeDefined();
+    expect(tower.max.y).toBe(OBSERVATION_TOWER.height);
+    const otherRoofs = map.boxes.filter((box) => box.kind === 'building' && box !== tower).map((box) => box.max.y);
+    expect(tower.max.y).toBeGreaterThan(Math.max(...otherRoofs) + 50);
+    const point = { x: OBSERVATION_TOWER.x, y: OBSERVATION_TOWER.height + 0.05, z: OBSERVATION_TOWER.z };
+    expect(raycast(map, { ...point, y: point.y + 2 }, { x: 0, y: -1, z: 0 }, 4)?.box).toBe(tower);
+    const world = new World(null, map);
+    world.respawnAt(point, 0);
+    for (let i = 0; i < 60; i += 1) world.step(emptyInput(), TICK);
+    expect(world.player.pos.y).toBeCloseTo(point.y, 1);
+  });
+
   it('is the same city for every player', () => {
     expect(JSON.stringify(buildCity())).toBe(JSON.stringify(city));
   });

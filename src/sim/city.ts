@@ -16,6 +16,8 @@ const INNER = 2;
 const OUTER = 7;
 /** Roads closer to the middle than this run into the Spire district, which has its own streets. */
 export const CITY_FROM = 130;
+/** A landmark with an open roof looking back over the centre of the city. */
+export const OBSERVATION_TOWER = { x: BLOCK * 3, z: 0, width: 34, depth: 34, height: 210 } as const;
 
 export const CAR_SIZE = { length: 4.4, width: 2, height: 1.5 };
 /** Street lamp posts: thin, solid, and about two storeys tall. */
@@ -162,7 +164,9 @@ export function buildCity(): CityParts {
         prop(lamp.x, lamp.z, LAMP_POST, LAMP_POST, 0, LAMP_HEIGHT);
       }
       const spawnHere = SPAWN_CELLS.some(([x, z]) => x === gx && z === gz);
+      const observationTower = cx === OBSERVATION_TOWER.x && cz === OBSERVATION_TOWER.z;
       let layout = layoutFor(ring, r(1));
+      if (observationTower) layout = 'tower';
       if (spawnHere && (layout === 'park' || layout === 'parking')) layout = 'tower';
 
       const height = (lo: number, hi: number, salt: number) => Math.round(lo + (hi - lo) * r(salt));
@@ -171,6 +175,12 @@ export function buildCity(): CityParts {
 
       switch (layout) {
         case 'tower': {
+          if (observationTower) {
+            const tower = solid(cx, cz, OBSERVATION_TOWER.width, OBSERVATION_TOWER.depth, OBSERVATION_TOWER.height, 'glass');
+            tower.landmark = 'observation';
+            built.push(tower);
+            break;
+          }
           const w = 22 + Math.round(r(2) * 3) * 2;
           const d = 22 + Math.round(r(3) * 3) * 2;
           built.push(solid(cx, cz, w, d, height(70 * tall, 104 * tall, 4), r(5) < 0.6 ? 'glass' : 'brick'));
